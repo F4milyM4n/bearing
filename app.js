@@ -628,6 +628,13 @@ function TrainingTracker() {
             return;
         const todayMonday = weekAnchorOf(new Date(), profile.weekStartDay ?? 1);
         if (progress.weekMonday !== todayMonday) {
+            if (progress.weekMonday === null) {
+                // First-ever run: just establish the baseline week. Don't advance
+                // the cycle or evaluate progression — there's no prior week to
+                // advance from, so this should start at Week 1, Session 1.
+                persistProgress({ ...progress, weekMonday: todayMonday, sessionsThisWeek: 0 });
+                return;
+            }
             const wrapping = progress.cycleWeek === 2;
             let { cycleCount, lastWeek3RPEStrength, lastWeek3CycleStrength, consecutiveHighStrength, consecutiveLowStrength, holdStrength, strengthProgressionNote, lastWeek3RPEStamina, lastWeek3CycleStamina, consecutiveHighStamina, consecutiveLowStamina, holdStamina, staminaProgressionNote, } = progress;
             if (wrapping) {
