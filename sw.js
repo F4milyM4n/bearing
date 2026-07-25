@@ -1,4 +1,7 @@
-const CACHE_NAME = 'bearing-v1';
+// Bump this whenever the cached asset list (or any cached file) changes --
+// that version-string change is what makes the browser notice there's an
+// updated service worker at all, since it byte-compares this file itself.
+const CACHE_NAME = 'bearing-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -6,6 +9,8 @@ const ASSETS = [
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './icons/icon-192-maskable.png',
+  './icons/icon-512-maskable.png',
 ];
 
 self.addEventListener('install', (event) => {
@@ -24,25 +29,28 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Cache-first for the app shell; network-first fallback for anything else
-// (e.g. the Tailwind/React CDN scripts, so updates to those still arrive
-// when online, but the app still boots from cache when offline).
+// Network-first for same-origin requests, falling back to cache only when
+// offline -- this way, updates to the app shell (including icons/manifest)
+// show up on the very next load while online, instead of getting stuck
+// behind whatever was cached during a previous visit. Cross-origin CDN
+// requests (Tailwind/React) just go straight to the network; there's
+// nothing meaningful to cache-fallback there anyway.
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
 
+  const isSameOrigin = new URL(req.url).origin === self.location.origin;
+  if (!isSameOrigin) return;
+
   event.respondWith(
-    caches.match(req).then((cached) => {
-      if (cached) return cached;
-      return fetch(req)
-        .then((res) => {
-          if (res.ok && new URL(req.url).origin === self.location.origin) {
-            const copy = res.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => cached);
-    })
+    fetch(req)
+      .then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(req))
   );
 });
