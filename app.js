@@ -1,14 +1,5 @@
 "use strict";
-// Standalone build: React/ReactDOM are loaded as UMD globals via <script>
-// tags in index.html (no bundler/build step, no Recharts dependency —
-// charts are hand-rolled SVG below for reliability without a CDN). This
-// file is compiled from JSX to plain React.createElement calls ahead of time.
 const { useState, useEffect, useCallback, useRef } = React;
-// localStorage shim matching the { get(key), set(key, value) } shape the
-// rest of this file already uses, so no other code needed to change.
-// Note: localStorage is per-browser/per-device, not tied to any account —
-// each person who installs this on their own phone gets their own data,
-// and there's no cloud sync between devices.
 const storage = {
     get: async (key) => {
         const v = localStorage.getItem(key);
@@ -19,9 +10,6 @@ const storage = {
         return { key, value };
     },
 };
-// Minimal original icon set (stroke-style, 24x24) standing in for the
-// lucide-react icons used in the Claude-artifact version — avoids an
-// extra CDN dependency for a handful of simple glyphs.
 function Icon({ size = 16, className = '', children }) {
     return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", className: className }, children));
 }
@@ -484,6 +472,32 @@ function InstallButton() {
                     React.createElement("strong", null, "Install App"),
                     "."),
             React.createElement("button", { onClick: () => setShowHelp(false), className: "block mt-2 tt-accent underline" }, "Got it")))));
+}
+// Wipes everything this app has stored on this device -- localStorage,
+// the service worker registration, and its cache -- then reloads to a
+// clean state. This is the in-app equivalent of manually clearing site
+// data from the browser's settings, without having to leave the app or
+// find the right settings screen on a given phone.
+async function clearAppData() {
+    try {
+        localStorage.clear();
+    }
+    catch (e) { }
+    try {
+        if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((r) => r.unregister()));
+        }
+    }
+    catch (e) { }
+    try {
+        if ('caches' in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((k) => caches.delete(k)));
+        }
+    }
+    catch (e) { }
+    window.location.reload();
 }
 /* ---------------------------------------------------------------------
    ONBOARDING — first-run landing screen to set maxes/VDOT/theme before
@@ -1447,7 +1461,6 @@ function buildMaxHistoryData(maxHistory) {
         vdot: parseFloat(h.vdot) || null,
     }));
 }
-/* ---- Dependency-free SVG charts (no Recharts/CDN needed) ---- */
 function StackedBarChart({ data, series, vbWidth, vbHeight }) {
     const padding = { top: 10, right: 8, bottom: 22, left: 8 };
     const chartW = vbWidth - padding.left - padding.right;
@@ -1487,7 +1500,7 @@ function DualLineChart({ data, series, vbWidth, vbHeight }) {
     const leftVals = data.flatMap((row) => leftKeys.map((k) => row[k]).filter((v) => v != null));
     const leftMin = leftVals.length ? Math.min(...leftVals) * 0.95 : 0;
     const leftMax = leftVals.length ? Math.max(...leftVals) * 1.05 : 1;
-    const rightMin = 30, rightMax = 65; // VDOT table range, kept fixed for consistency with the rest of the app
+    const rightMin = 30, rightMax = 65;
     function xAt(i) { return n > 1 ? padding.left + (chartW * i) / (n - 1) : padding.left + chartW / 2; }
     function yAtLeft(v) { return padding.top + chartH - ((v - leftMin) / (leftMax - leftMin || 1)) * chartH; }
     function yAtRight(v) { return padding.top + chartH - ((v - rightMin) / (rightMax - rightMin || 1)) * chartH; }
@@ -1567,6 +1580,7 @@ function ProgressTab({ log, maxHistory, weekStartDay }) {
    SETUP TAB
 --------------------------------------------------------------------- */
 function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, setResetArmed, onReset, onRerunSetup }) {
+    const [clearArmed, setClearArmed] = useState(false);
     const [local, setLocal] = useState(profile);
     useEffect(() => setLocal(profile), [profile]);
     const refPercents = [90, 82.5, 80, 75, 70, 60, 50];
@@ -1702,7 +1716,13 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
                 " regardless of adherence; only the weekly 1\u20134 session rotation resets to Session 1. Changes from these rules apply automatically \u2014 adjust the fields above directly if you ever want to override."),
             !resetArmed ? (React.createElement("button", { onClick: () => setResetArmed(true), className: "text-sm tt-warning border tt-border-warning rounded px-3 py-1.5" }, "Reset this week's rotation to Session 1")) : (React.createElement("div", { className: "flex gap-2" },
                 React.createElement("button", { onClick: onReset, className: "text-sm tt-bg-warning-solid text-white rounded px-3 py-1.5 font-bold" }, "Confirm reset"),
-                React.createElement("button", { onClick: () => setResetArmed(false), className: "text-base tt-text-tertiary border tt-border-light rounded px-3 py-1.5" }, "Cancel"))))));
+                React.createElement("button", { onClick: () => setResetArmed(false), className: "text-base tt-text-tertiary border tt-border-light rounded px-3 py-1.5" }, "Cancel")))),
+        React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
+            React.createElement("h2", { className: "font-bold text-base uppercase tracking-wide mb-2" }, "Clear App Data"),
+            React.createElement("p", { className: "text-sm tt-text-secondary mb-3" }, "Wipes everything stored on this device \u2014 training maxes, history, progress, and cached files \u2014 and reloads to a fresh install. Use this if the app ever seems stuck showing outdated data after an update. This cannot be undone."),
+            !clearArmed ? (React.createElement("button", { onClick: () => setClearArmed(true), className: "text-sm tt-warning border tt-border-warning rounded px-3 py-1.5" }, "Clear all app data")) : (React.createElement("div", { className: "flex gap-2" },
+                React.createElement("button", { onClick: clearAppData, className: "text-sm tt-bg-warning-solid text-white rounded px-3 py-1.5 font-bold" }, "Confirm \u2014 erase everything"),
+                React.createElement("button", { onClick: () => setClearArmed(false), className: "text-base tt-text-tertiary border tt-border-light rounded px-3 py-1.5" }, "Cancel"))))));
 }
 /* ---------------------------------------------------------------------
    MOUNT
