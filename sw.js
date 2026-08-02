@@ -1,7 +1,7 @@
 // Bump this whenever the cached asset list (or any cached file) changes --
 // that version-string change is what makes the browser notice there's an
 // updated service worker at all, since it byte-compares this file itself.
-const CACHE_NAME = 'bearing-v3';
+const CACHE_NAME = 'bearing-v4';
 const ASSETS = [
   './',
   './index.html',
