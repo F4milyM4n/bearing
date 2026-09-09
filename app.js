@@ -83,7 +83,7 @@ const STAMINA_WEEKS = [
 const THEMES = {
     nightvision: {
         name: 'Night Vision',
-        bgDeep: '#131515', bgPanel: '#1c201f', bgInset: '#23282a', border: '#2a2f2d', borderLight: '#384039',
+        bgDeep: '#242726', bgPanel: '#2c302f', bgInset: '#363b39', border: '#3e4442', borderLight: '#4c5350',
         textPrimary: '#e3ede4', textSecondary: '#b9c9ba', textTertiary: '#7f9482', textOnAccent: '#0c1410',
         accent: '#4AFF6B', accentSolid: '#39E85C', accentSolidHover: '#52FF7D', accentBorder: '#4AFF6B',
         accentBgTint: '#17301f', accentTextOnTint: '#7CFFA0', accentBorderDim: '#2f5c3d', accentTextDim: '#4AFF6B',
@@ -269,6 +269,18 @@ function fmtDate(iso) {
 //   - At target                       -> advance 1 row.
 //   - Below target, 2 cycles running  -> advance 2 rows instead of 1.
 //   - A single above/below (not yet a streak) still advances 1 row.
+// True when a lift felt easy in Week 1 (Below target) but caught up to or
+// exceeded target by Week 3 of that same cycle -- that pattern means the
+// Lower % curve is underloading it early, and Higher would fit better.
+// Shared by Setup (checking staged/local values) and Session 1 (checking
+// the live profile value) so the same rule can't drift between the two.
+function shouldSuggestHigherCapacity(progress, lift, currentCapacity) {
+    const sameCycle = progress.lastWeek1CycleStrength != null && progress.lastWeek1CycleStrength === progress.lastWeek3CycleStrength;
+    return sameCycle &&
+        progress.lastWeek1RPEStrength?.[lift] === 'below' &&
+        ['at', 'above'].includes(progress.lastWeek3RPEStrength?.[lift]) &&
+        (currentCapacity || 'lower') === 'lower';
+}
 function evaluateProgression(band, consecutiveHigh, consecutiveLow) {
     let rows = 0, hold = false, note;
     if (band === 'above') {
@@ -407,6 +419,8 @@ const DEFAULT_PROGRESS = {
     sessionsThisWeek: 0,
     cycleWeek: 0,
     cycleCount: 1,
+    lastWeek1RPEStrength: null,
+    lastWeek1CycleStrength: null,
     lastWeek3RPEStrength: null,
     lastWeek3CycleStrength: null,
     consecutiveHighStrength: 0,
@@ -420,6 +434,24 @@ const DEFAULT_PROGRESS = {
     holdStamina: false,
     staminaProgressionNote: null,
 };
+/* ---------------------------------------------------------------------
+   MISSED WEEK PROMPT — shown when a full calendar week (or more) passed
+   with no activity at all, instead of silently treating it the same as a
+   normal single-week gap.
+--------------------------------------------------------------------- */
+function MissedWeekPrompt({ weeksMissed, theme, onRestart, onContinue }) {
+    return (React.createElement("div", { className: "min-h-screen tt-bg-deep tt-text-primary font-sans flex items-center justify-center px-4", "data-theme": theme || 'nightvision' },
+        React.createElement(ThemeStyle, null),
+        React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-5 max-w-sm w-full" },
+            React.createElement("h2", { className: "font-bold text-lg uppercase tracking-wide mb-2 tt-accent" }, weeksMissed > 1 ? `Missed ${weeksMissed} weeks` : 'Missed a week'),
+            React.createElement("p", { className: "text-base tt-text-secondary mb-4" },
+                "It's been ",
+                weeksMissed + 1,
+                " weeks since your last session, with no activity logged in between. Restart the 3-week cycle at Week 1, or continue from where the rotation left off?"),
+            React.createElement("div", { className: "flex flex-col gap-2" },
+                React.createElement("button", { onClick: onRestart, className: "tt-bg-accent-solid tt-text-onaccent font-bold text-sm uppercase tracking-widest px-4 py-2.5 rounded" }, "Restart at Week 1"),
+                React.createElement("button", { onClick: onContinue, className: "text-sm border tt-border-light tt-text-secondary rounded px-4 py-2.5" }, "Continue where I left off")))));
+}
 /* ---------------------------------------------------------------------
    PWA INSTALL — captures the browser's install prompt (Android/Chrome)
    outside React so it's available whenever it fires; iOS has no such
@@ -473,11 +505,6 @@ function InstallButton() {
                     "."),
             React.createElement("button", { onClick: () => setShowHelp(false), className: "block mt-2 tt-accent underline" }, "Got it")))));
 }
-// Wipes everything this app has stored on this device -- localStorage,
-// the service worker registration, and its cache -- then reloads to a
-// clean state. This is the in-app equivalent of manually clearing site
-// data from the browser's settings, without having to leave the app or
-// find the right settings screen on a given phone.
 async function clearAppData() {
     try {
         localStorage.clear();
@@ -500,9 +527,7 @@ async function clearAppData() {
     window.location.reload();
 }
 /* ---------------------------------------------------------------------
-   ONBOARDING — first-run landing screen to set maxes/VDOT/theme before
-   ever seeing the tabbed app. Reachable again later via Setup > "Run
-   setup again".
+   ONBOARDING
 --------------------------------------------------------------------- */
 function OnboardingScreen({ profile, onComplete }) {
     const [local, setLocal] = useState(profile);
@@ -544,6 +569,7 @@ function OnboardingScreen({ profile, onComplete }) {
 function TrainingTracker() {
     const [loading, setLoading] = useState(true);
     const [tab, setTab] = useState('today');
+    const [missedWeekPrompt, setMissedWeekPrompt] = useState(null);
     const [showOnboarding, setShowOnboarding] = useState(false);
     const [profile, setProfile] = useState({ squatTM: '', benchTM: '', vdot: '', squatRepCapacity: 'lower', benchRepCapacity: 'lower', weekStartDay: 1, theme: 'nightvision' });
     const [progress, setProgress] = useState(DEFAULT_PROGRESS);
@@ -637,6 +663,85 @@ function TrainingTracker() {
     // (Session 1 top-set RPE -> Training Max) and the Threshold track
     // (Session 2 interval RPE -> VDOT) completely independently of one
     // another — each has its own streak counters and hold state.
+    // Advances the rotation/cycle by exactly one week step, running the same
+    // wrapping + progression logic regardless of whether it's called
+    // automatically (a normal single-week gap) or from the missed-week
+    // prompt's "continue where I left off" choice.
+    function advanceCycleStep(todayMonday) {
+        const wrapping = progress.cycleWeek === 2;
+        let { cycleCount, lastWeek3RPEStrength, lastWeek3CycleStrength, consecutiveHighStrength, consecutiveLowStrength, holdStrength, strengthProgressionNote, lastWeek3RPEStamina, lastWeek3CycleStamina, consecutiveHighStamina, consecutiveLowStamina, holdStamina, staminaProgressionNote, } = progress;
+        if (wrapping) {
+            let tmRows = 0;
+            let vdotRows = 0;
+            // Strength (Session 1) -> Training Max. Either lift reading "above"
+            // counts the week as above (conservative); both must read "below"
+            // for the week to count as below.
+            if (lastWeek3RPEStrength && lastWeek3CycleStrength === cycleCount) {
+                const squatBand = lastWeek3RPEStrength.squat;
+                const benchBand = lastWeek3RPEStrength.bench;
+                let band;
+                if (squatBand === 'above' || benchBand === 'above')
+                    band = 'above';
+                else if (squatBand === 'below' && benchBand === 'below')
+                    band = 'below';
+                else
+                    band = 'at';
+                const r = evaluateProgression(band, consecutiveHighStrength, consecutiveLowStrength);
+                consecutiveHighStrength = r.consecutiveHigh;
+                consecutiveLowStrength = r.consecutiveLow;
+                holdStrength = r.hold;
+                strengthProgressionNote = r.note;
+                tmRows = r.rows;
+            }
+            else {
+                strengthProgressionNote = 'No Week 3 data recorded last cycle — training max left unchanged.';
+            }
+            // Threshold (Session 2) -> VDOT.
+            if (lastWeek3RPEStamina && lastWeek3CycleStamina === cycleCount) {
+                const r = evaluateProgression(lastWeek3RPEStamina, consecutiveHighStamina, consecutiveLowStamina);
+                consecutiveHighStamina = r.consecutiveHigh;
+                consecutiveLowStamina = r.consecutiveLow;
+                holdStamina = r.hold;
+                staminaProgressionNote = r.note;
+                vdotRows = r.rows;
+            }
+            else {
+                staminaProgressionNote = 'No Week 3 data recorded last cycle — VDOT left unchanged.';
+            }
+            if (tmRows > 0 || vdotRows > 0) {
+                const nextProfile = { ...profile };
+                if (tmRows > 0) {
+                    nextProfile.squatTM = String(roundTo5((parseFloat(profile.squatTM) || 0) + 5 * tmRows));
+                    nextProfile.benchTM = String(roundTo5((parseFloat(profile.benchTM) || 0) + 5 * tmRows));
+                }
+                if (vdotRows > 0) {
+                    nextProfile.vdot = String((parseFloat(profile.vdot) || 0) + vdotRows);
+                }
+                persistProfile(nextProfile);
+                const noteParts = [];
+                if (tmRows > 0)
+                    noteParts.push(`TM +${tmRows} row${tmRows > 1 ? 's' : ''}`);
+                if (vdotRows > 0)
+                    noteParts.push(`VDOT +${vdotRows} row${vdotRows > 1 ? 's' : ''}`);
+                persistMaxHistory([{
+                        date: new Date().toISOString(),
+                        squatTM: nextProfile.squatTM,
+                        benchTM: nextProfile.benchTM,
+                        vdot: nextProfile.vdot,
+                        note: `Auto-progression — ${noteParts.join(', ')}`,
+                    }, ...maxHistory]);
+            }
+            cycleCount = (cycleCount || 1) + 1;
+        }
+        persistProgress({
+            weekMonday: todayMonday,
+            sessionsThisWeek: 0,
+            cycleWeek: (progress.cycleWeek + 1) % 3,
+            cycleCount,
+            lastWeek3RPEStrength, lastWeek3CycleStrength, consecutiveHighStrength, consecutiveLowStrength, holdStrength, strengthProgressionNote,
+            lastWeek3RPEStamina, lastWeek3CycleStamina, consecutiveHighStamina, consecutiveLowStamina, holdStamina, staminaProgressionNote,
+        });
+    }
     useEffect(() => {
         if (loading)
             return;
@@ -649,81 +754,27 @@ function TrainingTracker() {
                 persistProgress({ ...progress, weekMonday: todayMonday, sessionsThisWeek: 0 });
                 return;
             }
-            const wrapping = progress.cycleWeek === 2;
-            let { cycleCount, lastWeek3RPEStrength, lastWeek3CycleStrength, consecutiveHighStrength, consecutiveLowStrength, holdStrength, strengthProgressionNote, lastWeek3RPEStamina, lastWeek3CycleStamina, consecutiveHighStamina, consecutiveLowStamina, holdStamina, staminaProgressionNote, } = progress;
-            if (wrapping) {
-                let tmRows = 0;
-                let vdotRows = 0;
-                // Strength (Session 1) -> Training Max. Either lift reading "above"
-                // counts the week as above (conservative); both must read "below"
-                // for the week to count as below.
-                if (lastWeek3RPEStrength && lastWeek3CycleStrength === cycleCount) {
-                    const squatBand = lastWeek3RPEStrength.squat;
-                    const benchBand = lastWeek3RPEStrength.bench;
-                    let band;
-                    if (squatBand === 'above' || benchBand === 'above')
-                        band = 'above';
-                    else if (squatBand === 'below' && benchBand === 'below')
-                        band = 'below';
-                    else
-                        band = 'at';
-                    const r = evaluateProgression(band, consecutiveHighStrength, consecutiveLowStrength);
-                    consecutiveHighStrength = r.consecutiveHigh;
-                    consecutiveLowStrength = r.consecutiveLow;
-                    holdStrength = r.hold;
-                    strengthProgressionNote = r.note;
-                    tmRows = r.rows;
-                }
-                else {
-                    strengthProgressionNote = 'No Week 3 data recorded last cycle — training max left unchanged.';
-                }
-                // Threshold (Session 2) -> VDOT.
-                if (lastWeek3RPEStamina && lastWeek3CycleStamina === cycleCount) {
-                    const r = evaluateProgression(lastWeek3RPEStamina, consecutiveHighStamina, consecutiveLowStamina);
-                    consecutiveHighStamina = r.consecutiveHigh;
-                    consecutiveLowStamina = r.consecutiveLow;
-                    holdStamina = r.hold;
-                    staminaProgressionNote = r.note;
-                    vdotRows = r.rows;
-                }
-                else {
-                    staminaProgressionNote = 'No Week 3 data recorded last cycle — VDOT left unchanged.';
-                }
-                if (tmRows > 0 || vdotRows > 0) {
-                    const nextProfile = { ...profile };
-                    if (tmRows > 0) {
-                        nextProfile.squatTM = String(roundTo5((parseFloat(profile.squatTM) || 0) + 5 * tmRows));
-                        nextProfile.benchTM = String(roundTo5((parseFloat(profile.benchTM) || 0) + 5 * tmRows));
-                    }
-                    if (vdotRows > 0) {
-                        nextProfile.vdot = String((parseFloat(profile.vdot) || 0) + vdotRows);
-                    }
-                    persistProfile(nextProfile);
-                    const noteParts = [];
-                    if (tmRows > 0)
-                        noteParts.push(`TM +${tmRows} row${tmRows > 1 ? 's' : ''}`);
-                    if (vdotRows > 0)
-                        noteParts.push(`VDOT +${vdotRows} row${vdotRows > 1 ? 's' : ''}`);
-                    persistMaxHistory([{
-                            date: new Date().toISOString(),
-                            squatTM: nextProfile.squatTM,
-                            benchTM: nextProfile.benchTM,
-                            vdot: nextProfile.vdot,
-                            note: `Auto-progression — ${noteParts.join(', ')}`,
-                        }, ...maxHistory]);
-                }
-                cycleCount = (cycleCount || 1) + 1;
+            // weekAnchorOf always returns a date on the same weekday, so the gap
+            // between any two anchor dates is always a clean multiple of 7 days.
+            // A gap of exactly 7 days is normal (one week passed). A gap of 14+
+            // means at least one full week went by with zero activity -- ask
+            // before silently treating that the same as a normal week.
+            const daysGap = Math.round((new Date(todayMonday) - new Date(progress.weekMonday)) / 86400000);
+            if (daysGap >= 14) {
+                setMissedWeekPrompt({ todayMonday, weeksMissed: Math.round(daysGap / 7) - 1 });
+                return;
             }
-            persistProgress({
-                weekMonday: todayMonday,
-                sessionsThisWeek: 0,
-                cycleWeek: (progress.cycleWeek + 1) % 3,
-                cycleCount,
-                lastWeek3RPEStrength, lastWeek3CycleStrength, consecutiveHighStrength, consecutiveLowStrength, holdStrength, strengthProgressionNote,
-                lastWeek3RPEStamina, lastWeek3CycleStamina, consecutiveHighStamina, consecutiveLowStamina, holdStamina, staminaProgressionNote,
-            });
+            advanceCycleStep(todayMonday);
         }
     }, [loading]); // eslint-disable-line
+    function handleMissedWeekRestart() {
+        persistProgress({ ...progress, weekMonday: missedWeekPrompt.todayMonday, sessionsThisWeek: 0, cycleWeek: 0 });
+        setMissedWeekPrompt(null);
+    }
+    function handleMissedWeekContinue() {
+        advanceCycleStep(missedWeekPrompt.todayMonday);
+        setMissedWeekPrompt(null);
+    }
     // Manual edits from Setup also get recorded to history, but only when a
     // TM or VDOT value actually changed (not on every keystroke/save).
     function saveProfileManual(next) {
@@ -748,6 +799,13 @@ function TrainingTracker() {
         const entry = { id: Date.now(), date: entryDate(dateStr), type: nextType, payload, notes: notes || '' };
         persistLog([entry, ...log]);
         const next = { ...progress, sessionsThisWeek: Math.min(4, progress.sessionsThisWeek + 1) };
+        if (nextType === 1 && progress.cycleWeek === 0) {
+            next.lastWeek1RPEStrength = {
+                squat: payload.lifts?.squat?.topRPE ?? null,
+                bench: payload.lifts?.bench?.topRPE ?? null,
+            };
+            next.lastWeek1CycleStrength = progress.cycleCount;
+        }
         if (nextType === 1 && progress.cycleWeek === 2) {
             next.lastWeek3RPEStrength = {
                 squat: payload.lifts?.squat?.topRPE ?? null,
@@ -794,6 +852,9 @@ function TrainingTracker() {
     if (loading) {
         return React.createElement("div", { className: "min-h-[400px] flex items-center justify-center tt-bg-deep tt-text-secondary text-base" }, "Loading\u2026");
     }
+    if (missedWeekPrompt) {
+        return (React.createElement(MissedWeekPrompt, { weeksMissed: missedWeekPrompt.weeksMissed, theme: profile.theme, onRestart: handleMissedWeekRestart, onContinue: handleMissedWeekContinue }));
+    }
     if (showOnboarding) {
         return React.createElement(OnboardingScreen, { profile: profile, onComplete: completeOnboarding });
     }
@@ -810,7 +871,7 @@ function TrainingTracker() {
                 React.createElement(TabButton, { active: tab === 'log', onClick: () => setTab('log'), icon: ClipboardList }, "Log"),
                 React.createElement(TabButton, { active: tab === 'progress', onClick: () => setTab('progress'), icon: TrendingUp }, "Progress"),
                 React.createElement(TabButton, { active: tab === 'setup', onClick: () => setTab('setup'), icon: Settings }, "Setup")),
-            tab === 'today' && (React.createElement(TodayTab, { nextType: nextType, cycleWeek: progress.cycleWeek, cycleCount: progress.cycleCount, squatRepCapacity: profile.squatRepCapacity || 'lower', benchRepCapacity: profile.benchRepCapacity || 'lower', weekStartDay: profile.weekStartDay ?? 1, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, sessionsThisWeek: progress.sessionsThisWeek, weekMonday: progress.weekMonday, onComplete: completeSession, onCompleteExtra: completeExtra, onCompleteBackfill: completeBackfill, onSkip: skipSession })),
+            tab === 'today' && (React.createElement(TodayTab, { nextType: nextType, cycleWeek: progress.cycleWeek, cycleCount: progress.cycleCount, progress: progress, squatRepCapacity: profile.squatRepCapacity || 'lower', benchRepCapacity: profile.benchRepCapacity || 'lower', weekStartDay: profile.weekStartDay ?? 1, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, sessionsThisWeek: progress.sessionsThisWeek, weekMonday: progress.weekMonday, onComplete: completeSession, onCompleteExtra: completeExtra, onCompleteBackfill: completeBackfill, onSkip: skipSession, onSetRepCapacity: (lift, value) => persistProfile({ ...profile, [`${lift}RepCapacity`]: value }) })),
             tab === 'log' && React.createElement(LogTab, { log: log, onDelete: deleteEntry }),
             tab === 'progress' && React.createElement(ProgressTab, { log: log, maxHistory: maxHistory, weekStartDay: profile.weekStartDay ?? 1 }),
             tab === 'setup' && (React.createElement(SetupTab, { profile: profile, onSave: saveProfileManual, progress: progress, onUpdateProgress: (patch) => persistProgress({ ...progress, ...patch }), resetArmed: resetArmed, setResetArmed: setResetArmed, onReset: () => { persistProgress({ ...progress, weekMonday: weekAnchorOf(new Date(), profile.weekStartDay ?? 1), sessionsThisWeek: 0 }); setResetArmed(false); }, onRerunSetup: () => setShowOnboarding(true) })))));
@@ -818,7 +879,7 @@ function TrainingTracker() {
 /* ---------------------------------------------------------------------
    TODAY TAB
 --------------------------------------------------------------------- */
-function TodayTab({ nextType, cycleWeek, cycleCount, squatRepCapacity, benchRepCapacity, weekStartDay, squatTM, benchTM, vdot, paces, sessionsThisWeek, weekMonday, onComplete, onCompleteExtra, onCompleteBackfill, onSkip }) {
+function TodayTab({ nextType, cycleWeek, cycleCount, progress, squatRepCapacity, benchRepCapacity, weekStartDay, squatTM, benchTM, vdot, paces, sessionsThisWeek, weekMonday, onComplete, onCompleteExtra, onCompleteBackfill, onSkip, onSetRepCapacity }) {
     const needsLifts = nextType === 1 && (!squatTM || !benchTM);
     const needsRun = (nextType === 2 || nextType === 4) && !vdot;
     const needsBoth = nextType === 3 && (!squatTM || !benchTM || !vdot);
@@ -829,7 +890,7 @@ function TodayTab({ nextType, cycleWeek, cycleCount, squatRepCapacity, benchRepC
         needsLifts && React.createElement(SetupNudge, { text: "Set your Bench and Squat training maxes in Setup to see today's numbers." }),
         needsRun && React.createElement(SetupNudge, { text: "Set your VDOT in Setup to see today's paces." }),
         needsBoth && React.createElement(SetupNudge, { text: "Session 3 uses both training maxes and VDOT \u2014 set both in Setup to see today's numbers." }),
-        nextType === 1 && !needsLifts && (React.createElement(Session1, { weekIdx: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: onComplete })),
+        nextType === 1 && !needsLifts && (React.createElement(Session1, { weekIdx: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: onComplete, progress: progress, onSetRepCapacity: onSetRepCapacity })),
         nextType === 2 && !needsRun && React.createElement(Session2, { weekIdx: cycleWeek, vdot: vdot, onComplete: onComplete }),
         nextType === 3 && !needsBoth && (React.createElement(Session3, { squatTM: squatTM, benchTM: benchTM, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, vdot: vdot, paces: paces, onComplete: onComplete })),
         nextType === 4 && !needsRun && (React.createElement(EasyRun, { paces: paces, onComplete: onComplete, label: SESSION_LABEL[4], contextNote: "Best placed the day after Session 3. Check cardiac drift (~5% or less in the first hour) afterward to confirm the effort stayed easy." })),
@@ -877,7 +938,7 @@ function BackfillPanel({ cycleWeek, squatRepCapacity, benchRepCapacity, squatTM,
             type === 4 && React.createElement(EasyRun, { paces: paces, onComplete: handleComplete, label: backfillLabel, contextNote: "Backfilled entry \u2014 logged for the record." })))));
 }
 /* ---- Session 1: Strength — Accumulation/Transmutation/Realization wave ---- */
-function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchTM, onComplete, label }) {
+function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchTM, onComplete, label, progress, onSetRepCapacity }) {
     const week = STRENGTH_WEEKS[weekIdx];
     const lifts = [
         { key: 'bench', label: 'Bench', tm: benchTM, repCapacity: benchRepCapacity },
@@ -932,6 +993,10 @@ function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchT
                         " \u00B7 ",
                         l.repCapacity === 'higher' ? 'Higher' : 'Lower',
                         " capacity")),
+                progress && shouldSuggestHigherCapacity(progress, l.key, l.repCapacity) && (React.createElement("div", { className: "tt-bg-accent-tint border tt-border-accent-dim rounded-lg p-3 mb-2 text-sm tt-text-accent-tint" },
+                    l.label,
+                    " was Below target in Week 1 but caught up to target by Week 3 \u2014 worth trying Higher capacity.",
+                    onSetRepCapacity && (React.createElement("button", { onClick: () => onSetRepCapacity(l.key, 'higher'), className: "block mt-2 font-bold uppercase tracking-wide underline" }, "Switch to Higher")))),
                 React.createElement("div", { className: "mb-2" },
                     React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" }, "Warm-up"),
                     rx.warmups.map((w, i) => (React.createElement("div", { key: i, className: "flex justify-between items-baseline py-0.5" },
@@ -1597,6 +1662,12 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
                 React.createElement(LabeledInput, { label: "Bench TM (lb)", value: local.benchTM, onChange: (v) => setLocal({ ...local, benchTM: v }) }),
                 React.createElement(LabeledInput, { label: "Squat TM (lb)", value: local.squatTM, onChange: (v) => setLocal({ ...local, squatTM: v }) })),
             React.createElement(LabeledInput, { label: "VDOT", value: local.vdot, onChange: (v) => setLocal({ ...local, vdot: v }), full: true }),
+            (() => {
+                return ['bench', 'squat'].map((lift) => shouldSuggestHigherCapacity(progress, lift, local[`${lift}RepCapacity`]) && (React.createElement("div", { key: lift, className: "tt-bg-accent-tint border tt-border-accent-dim rounded-lg p-3 mt-3 text-sm tt-text-accent-tint" },
+                    lift === 'bench' ? 'Bench' : 'Squat',
+                    " was Below target in Week 1 but caught up to target by Week 3 \u2014 worth trying Higher capacity.",
+                    React.createElement("button", { onClick: () => setLocal({ ...local, [`${lift}RepCapacity`]: 'higher' }), className: "block mt-2 font-bold uppercase tracking-wide underline" }, "Switch to Higher"))));
+            })(),
             React.createElement("div", { className: "mt-3" },
                 React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
                     "Bench rep capacity ",
