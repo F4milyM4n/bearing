@@ -1,11 +1,11 @@
-// Bump this whenever the cached asset list (or any cached file) changes --
-// that version-string change is what makes the browser notice there's an
-// updated service worker at all, since it byte-compares this file itself.
-const CACHE_NAME = 'bearing-v8';
+// Bump CACHE_NAME on every release. The browser byte-compares this file to
+// decide whether a new service worker exists at all, so changing this string
+// is what tells already-installed copies of the app to update.
+const CACHE_NAME = 'bearing-v9';
 const ASSETS = [
   './',
   './index.html',
-  './app.js',
+  './app.js?v=9',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -17,6 +17,7 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
   );
+  // Don't wait for every old tab/window to close -- take over right away.
   self.skipWaiting();
 });
 
@@ -26,24 +27,24 @@ self.addEventListener('activate', (event) => {
       Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
     )
   );
+  // Start controlling already-open pages immediately; index.html listens for
+  // this takeover and reloads once so the new version actually runs.
   self.clients.claim();
 });
 
-// Network-first for same-origin requests, falling back to cache only when
-// offline -- this way, updates to the app shell (including icons/manifest)
-// show up on the very next load while online, instead of getting stuck
-// behind whatever was cached during a previous visit. Cross-origin CDN
-// requests (Tailwind/React) just go straight to the network; there's
-// nothing meaningful to cache-fallback there anyway.
+// Network-first for same-origin requests, falling back to the cache only when
+// offline. `cache: 'no-cache'` makes the browser revalidate with the server
+// instead of trusting its own HTTP cache -- GitHub Pages marks files as
+// cacheable for ~10 minutes, which otherwise could hand back a stale app.js
+// right after an update. Cross-origin CDN requests (Tailwind/React) go
+// straight to the network.
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
-
-  const isSameOrigin = new URL(req.url).origin === self.location.origin;
-  if (!isSameOrigin) return;
+  if (new URL(req.url).origin !== self.location.origin) return;
 
   event.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' })
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();
@@ -51,6 +52,6 @@ self.addEventListener('fetch', (event) => {
         }
         return res;
       })
-      .catch(() => caches.match(req))
+      .catch(() => caches.match(req, { ignoreSearch: true }))
   );
 });

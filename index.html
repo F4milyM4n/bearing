@@ -31,22 +31,34 @@
 <div id="root">
   <noscript>Bearing requires JavaScript to run.</noscript>
 </div>
-<script src="app.js"></script>
+<!-- ?v= changes with every release so a stale cached copy can never be reused -->
+<script src="app.js?v=9"></script>
 <script>
   if ('serviceWorker' in navigator) {
+    // Only reload for an UPDATE (a service worker was already in control when
+    // this page opened). On a first-ever visit the worker also "takes over",
+    // but reloading then would just interrupt onboarding for no reason.
+    const hadController = !!navigator.serviceWorker.controller;
     let refreshedOnce = false;
-    // Fires when a new service worker (already installed via skipWaiting +
-    // clients.claim in sw.js) takes over control of this page -- force a
-    // reload right then so an already-installed app actually picks up the
-    // update on its next open, instead of silently continuing to run
-    // whatever was cached before.
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (refreshedOnce) return;
+      if (!hadController || refreshedOnce) return;
       refreshedOnce = true;
       window.location.reload();
     });
+
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').catch(() => {});
+      // updateViaCache:'none' => sw.js itself is never served from HTTP cache,
+      // so a new release is noticed as soon as the page is opened.
+      navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+        // An installed app often stays alive in the background for days.
+        // Re-check for a new release whenever it comes back to the foreground
+        // and once an hour while it is open.
+        const check = () => { reg.update().catch(() => {}); };
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') check();
+        });
+        setInterval(check, 60 * 60 * 1000);
+      }).catch(() => {});
     });
   }
 </script>

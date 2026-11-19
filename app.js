@@ -10,6 +10,8 @@ const storage = {
         return { key, value };
     },
 };
+// Shown at the bottom of Setup so it's obvious which build is running after an update.
+const APP_BUILD = '9';
 function Icon({ size = 16, className = '', children }) {
     return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", className: className }, children));
 }
@@ -263,58 +265,11 @@ function fmtDate(iso) {
     const d = new Date(iso);
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
-// Shared Long-Term Progression rule, applied independently to the Strength
-// track (-> Training Max) and the Threshold track (-> VDOT):
-//   - Above target, 2 cycles running  -> hold (no change) while it lasts.
-//   - At target                       -> advance 1 row.
-//   - Below target, 2 cycles running  -> advance 2 rows instead of 1.
-//   - A single above/below (not yet a streak) still advances 1 row.
-// True when a lift felt easy in Week 1 (Below target) but caught up to or
-// exceeded target by Week 3 of that same cycle -- that pattern means the
-// Lower % curve is underloading it early, and Higher would fit better.
-// Shared by Setup (checking staged/local values) and Session 1 (checking
-// the live profile value) so the same rule can't drift between the two.
-function shouldSuggestHigherCapacity(progress, lift, currentCapacity) {
-    const sameCycle = progress.lastWeek1CycleStrength != null && progress.lastWeek1CycleStrength === progress.lastWeek3CycleStrength;
-    return sameCycle &&
-        progress.lastWeek1RPEStrength?.[lift] === 'below' &&
-        ['at', 'above'].includes(progress.lastWeek3RPEStrength?.[lift]) &&
-        (currentCapacity || 'lower') === 'lower';
-}
-function evaluateProgression(band, consecutiveHigh, consecutiveLow) {
-    let rows = 0, hold = false, note;
-    if (band === 'above') {
-        consecutiveHigh += 1;
-        consecutiveLow = 0;
-        hold = consecutiveHigh >= 2;
-        rows = hold ? 0 : 1;
-        note = hold
-            ? 'Held — Week 3 RPE was above target for 2 cycles in a row.'
-            : 'Advanced 1 row — Week 3 RPE was above target (not yet 2 in a row).';
-    }
-    else if (band === 'below') {
-        consecutiveLow += 1;
-        consecutiveHigh = 0;
-        hold = false;
-        if (consecutiveLow >= 2) {
-            rows = 2;
-            consecutiveLow = 0;
-            note = 'Advanced 2 rows — Week 3 RPE was below target for 2 cycles in a row.';
-        }
-        else {
-            rows = 1;
-            note = 'Advanced 1 row — Week 3 RPE was below target (not yet 2 in a row).';
-        }
-    }
-    else {
-        consecutiveHigh = 0;
-        consecutiveLow = 0;
-        hold = false;
-        rows = 1;
-        note = 'Advanced 1 row — Week 3 RPE was at target.';
-    }
-    return { consecutiveHigh, consecutiveLow, hold, rows, note };
-}
+// Long-Term Progression is fixed: when a 3-week cycle completes, both training
+// maxes go up TM_STEP lb and VDOT goes up VDOT_STEP -- provided that cycle's
+// Week 3 Strength (S1) / Threshold (S2) session was actually completed.
+const TM_STEP = 5;
+const VDOT_STEP = 1;
 /* ---------------------------------------------------------------------
    (COROS auto-sync removed — manual entry only.)
 --------------------------------------------------------------------- */
@@ -330,43 +285,23 @@ function TabButton({ active, onClick, icon: Icon, children }) {
         React.createElement(Icon, { size: 14 }),
         children));
 }
-function LabeledInput({ label, value, onChange, placeholder, full, big }) {
+function LabeledInput({ label, value, onChange, placeholder, full }) {
     return (React.createElement("label", { className: `block ${full ? 'col-span-3' : ''}` },
         React.createElement("span", { className: "text-sm tt-text-secondary block mb-0.5" }, label),
-        React.createElement("input", { type: "text", value: value, placeholder: placeholder, onChange: (e) => onChange(e.target.value), className: `tt-bg-inset border tt-border-light rounded w-full focus:outline-none tt-focus-accent ${big ? 'px-3 py-2.5 text-3xl font-bold font-mono' : 'px-2 py-1.5 text-sm font-mono'}` })));
+        React.createElement("input", { type: "text", value: value, placeholder: placeholder, onChange: (e) => onChange(e.target.value), className: "tt-bg-inset border tt-border-light rounded w-full focus:outline-none tt-focus-accent px-2 py-1.5 text-sm font-mono" })));
 }
-function NotesAndSubmit({ notes, setNotes, onSubmit }) {
+// The only input on a session card: one big Done button. `showDate` adds a
+// date picker (used by Backfill so a past session lands on the right day);
+// otherwise the entry is stamped with today's local date at tap time.
+function DoneButton({ onSubmit, showDate }) {
     const [dateStr, setDateStr] = useState(todayLocalStr);
-    return (React.createElement("div", { className: "mt-2" },
-        React.createElement("label", { className: "block mb-2" },
+    return (React.createElement("div", { className: "mt-3" },
+        showDate && (React.createElement("label", { className: "block mb-2" },
             React.createElement("span", { className: "text-sm tt-text-secondary block mb-0.5" }, "Date"),
-            React.createElement("input", { type: "date", value: dateStr, onChange: (e) => setDateStr(e.target.value), className: "tt-bg-inset border tt-border-light rounded px-2 py-1.5 text-sm font-mono focus:outline-none tt-focus-accent" })),
-        React.createElement("label", { className: "block mb-2" },
-            React.createElement("span", { className: "text-sm tt-text-secondary block mb-0.5" }, "Notes"),
-            React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 2, className: "tt-bg-inset border tt-border-light rounded px-2 py-1.5 text-sm w-full focus:outline-none tt-focus-accent" })),
-        React.createElement("button", { onClick: () => onSubmit(dateStr), className: "flex items-center gap-1.5 tt-bg-accent-solid tt-text-onaccent font-bold text-sm uppercase tracking-widest px-4 py-2 rounded" },
-            React.createElement(CheckCircle2, { size: 14 }),
-            " Complete Session")));
-}
-const RPE_BAND_LABEL = { below: 'Below', at: 'At target', above: 'Above' };
-function RPESelector({ value, onChange, target, exercise }) {
-    const options = [
-        { key: 'below', label: 'Below' },
-        { key: 'at', label: 'At' },
-        { key: 'above', label: 'Above' },
-    ];
-    const bandStyle = {
-        below: 'tt-border-secondary tt-bg-secondary-tint tt-secondary-light',
-        at: 'tt-border-success tt-bg-success-tint tt-success',
-        above: 'tt-border-warning tt-bg-warning-tint tt-warning',
-    };
-    return (React.createElement("div", null,
-        React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
-            exercise ? `${exercise} RPE` : 'RPE',
-            " vs target (",
-            target,
-            ")"),
-        React.createElement("div", { className: "flex gap-1.5" }, options.map((o) => (React.createElement("button", { key: o.key, type: "button", onClick: () => onChange(o.key), className: `flex-1 text-sm px-2 py-1.5 rounded border font-semibold ${value === o.key ? bandStyle[o.key] : 'tt-border-light tt-text-secondary'}` }, o.label))))));
+            React.createElement("input", { type: "date", value: dateStr, onChange: (e) => setDateStr(e.target.value), className: "tt-bg-inset border tt-border-light rounded px-2 py-1.5 text-sm font-mono focus:outline-none tt-focus-accent" }))),
+        React.createElement("button", { onClick: () => onSubmit(showDate ? dateStr : todayLocalStr()), className: "w-full flex items-center justify-center gap-2 tt-bg-accent-solid tt-text-onaccent font-bold text-base uppercase tracking-widest px-4 py-3 rounded-lg" },
+            React.createElement(CheckCircle2, { size: 18 }),
+            " Done")));
 }
 function SetupNudge({ text }) {
     return (React.createElement("div", { className: "tt-bg-accent-tint border tt-border-accent-dim tt-text-accent-tint text-base rounded-lg p-3 mb-4" }, text));
@@ -419,19 +354,14 @@ const DEFAULT_PROGRESS = {
     sessionsThisWeek: 0,
     cycleWeek: 0,
     cycleCount: 1,
-    lastWeek1RPEStrength: null,
-    lastWeek1CycleStrength: null,
-    lastWeek3RPEStrength: null,
-    lastWeek3CycleStrength: null,
-    consecutiveHighStrength: 0,
-    consecutiveLowStrength: 0,
-    holdStrength: false,
+    // Cycle number in which Week 3's Strength (S1) / Threshold (S2) session was
+    // completed. Older installs stored lastWeek3CycleStrength / lastWeek3CycleStamina
+    // for the same purpose; advanceCycleStep still honors those.
+    week3DoneStrength: null,
+    week3DoneStamina: null,
+    strengthAdvanced: null,
     strengthProgressionNote: null,
-    lastWeek3RPEStamina: null,
-    lastWeek3CycleStamina: null,
-    consecutiveHighStamina: 0,
-    consecutiveLowStamina: 0,
-    holdStamina: false,
+    staminaAdvanced: null,
     staminaProgressionNote: null,
 };
 /* ---------------------------------------------------------------------
@@ -656,73 +586,43 @@ function TrainingTracker() {
         }
     }, []);
     // Every "Day 1" (configurable in Setup, defaults to Monday): reset the
-    // weekly 1-4 session rotation to Session 1, and advance the 3-week
-    // strength/stamina cycle by one week — regardless of how much (or how
-    // little) got done the prior week. When the cycle wraps Realization ->
-    // Accumulation, evaluate Long-Term Progression for the Strength track
-    // (Session 1 top-set RPE -> Training Max) and the Threshold track
-    // (Session 2 interval RPE -> VDOT) completely independently of one
-    // another — each has its own streak counters and hold state.
-    // Advances the rotation/cycle by exactly one week step, running the same
-    // wrapping + progression logic regardless of whether it's called
-    // automatically (a normal single-week gap) or from the missed-week
-    // prompt's "continue where I left off" choice.
+    // weekly 1-4 session rotation to Session 1, and advance the 3-week cycle by
+    // one week -- regardless of how much (or how little) got done the prior
+    // week. When the cycle wraps Realization -> Accumulation, apply the fixed
+    // Long-Term Progression: +TM_STEP lb on both training maxes if Week 3's
+    // Strength session was completed, +VDOT_STEP if Week 3's Threshold session
+    // was. The two tracks are independent.
+    // Runs the same logic whether called automatically (a normal single-week
+    // gap) or from the missed-week prompt's "continue where I left off" choice.
     function advanceCycleStep(todayMonday) {
         const wrapping = progress.cycleWeek === 2;
-        let { cycleCount, lastWeek3RPEStrength, lastWeek3CycleStrength, consecutiveHighStrength, consecutiveLowStrength, holdStrength, strengthProgressionNote, lastWeek3RPEStamina, lastWeek3CycleStamina, consecutiveHighStamina, consecutiveLowStamina, holdStamina, staminaProgressionNote, } = progress;
+        let { cycleCount, strengthAdvanced, strengthProgressionNote, staminaAdvanced, staminaProgressionNote } = progress;
         if (wrapping) {
-            let tmRows = 0;
-            let vdotRows = 0;
-            // Strength (Session 1) -> Training Max. Either lift reading "above"
-            // counts the week as above (conservative); both must read "below"
-            // for the week to count as below.
-            if (lastWeek3RPEStrength && lastWeek3CycleStrength === cycleCount) {
-                const squatBand = lastWeek3RPEStrength.squat;
-                const benchBand = lastWeek3RPEStrength.bench;
-                let band;
-                if (squatBand === 'above' || benchBand === 'above')
-                    band = 'above';
-                else if (squatBand === 'below' && benchBand === 'below')
-                    band = 'below';
-                else
-                    band = 'at';
-                const r = evaluateProgression(band, consecutiveHighStrength, consecutiveLowStrength);
-                consecutiveHighStrength = r.consecutiveHigh;
-                consecutiveLowStrength = r.consecutiveLow;
-                holdStrength = r.hold;
-                strengthProgressionNote = r.note;
-                tmRows = r.rows;
-            }
-            else {
-                strengthProgressionNote = 'No Week 3 data recorded last cycle — training max left unchanged.';
-            }
-            // Threshold (Session 2) -> VDOT.
-            if (lastWeek3RPEStamina && lastWeek3CycleStamina === cycleCount) {
-                const r = evaluateProgression(lastWeek3RPEStamina, consecutiveHighStamina, consecutiveLowStamina);
-                consecutiveHighStamina = r.consecutiveHigh;
-                consecutiveLowStamina = r.consecutiveLow;
-                holdStamina = r.hold;
-                staminaProgressionNote = r.note;
-                vdotRows = r.rows;
-            }
-            else {
-                staminaProgressionNote = 'No Week 3 data recorded last cycle — VDOT left unchanged.';
-            }
-            if (tmRows > 0 || vdotRows > 0) {
+            const strengthDone = progress.week3DoneStrength === cycleCount || progress.lastWeek3CycleStrength === cycleCount;
+            const staminaDone = progress.week3DoneStamina === cycleCount || progress.lastWeek3CycleStamina === cycleCount;
+            strengthAdvanced = strengthDone;
+            strengthProgressionNote = strengthDone
+                ? `Training maxes +${TM_STEP} lb — Week 3 Strength was completed.`
+                : 'Week 3 Strength was not completed last cycle — training maxes left unchanged.';
+            staminaAdvanced = staminaDone;
+            staminaProgressionNote = staminaDone
+                ? `VDOT +${VDOT_STEP} — Week 3 Threshold was completed.`
+                : 'Week 3 Threshold was not completed last cycle — VDOT left unchanged.';
+            if (strengthDone || staminaDone) {
                 const nextProfile = { ...profile };
-                if (tmRows > 0) {
-                    nextProfile.squatTM = String(roundTo5((parseFloat(profile.squatTM) || 0) + 5 * tmRows));
-                    nextProfile.benchTM = String(roundTo5((parseFloat(profile.benchTM) || 0) + 5 * tmRows));
+                if (strengthDone) {
+                    nextProfile.squatTM = String(roundTo5((parseFloat(profile.squatTM) || 0) + TM_STEP));
+                    nextProfile.benchTM = String(roundTo5((parseFloat(profile.benchTM) || 0) + TM_STEP));
                 }
-                if (vdotRows > 0) {
-                    nextProfile.vdot = String((parseFloat(profile.vdot) || 0) + vdotRows);
+                if (staminaDone) {
+                    nextProfile.vdot = String((parseFloat(profile.vdot) || 0) + VDOT_STEP);
                 }
                 persistProfile(nextProfile);
                 const noteParts = [];
-                if (tmRows > 0)
-                    noteParts.push(`TM +${tmRows} row${tmRows > 1 ? 's' : ''}`);
-                if (vdotRows > 0)
-                    noteParts.push(`VDOT +${vdotRows} row${vdotRows > 1 ? 's' : ''}`);
+                if (strengthDone)
+                    noteParts.push(`TM +${TM_STEP} lb`);
+                if (staminaDone)
+                    noteParts.push(`VDOT +${VDOT_STEP}`);
                 persistMaxHistory([{
                         date: new Date().toISOString(),
                         squatTM: nextProfile.squatTM,
@@ -734,12 +634,12 @@ function TrainingTracker() {
             cycleCount = (cycleCount || 1) + 1;
         }
         persistProgress({
+            ...progress,
             weekMonday: todayMonday,
             sessionsThisWeek: 0,
             cycleWeek: (progress.cycleWeek + 1) % 3,
             cycleCount,
-            lastWeek3RPEStrength, lastWeek3CycleStrength, consecutiveHighStrength, consecutiveLowStrength, holdStrength, strengthProgressionNote,
-            lastWeek3RPEStamina, lastWeek3CycleStamina, consecutiveHighStamina, consecutiveLowStamina, holdStamina, staminaProgressionNote,
+            strengthAdvanced, strengthProgressionNote, staminaAdvanced, staminaProgressionNote,
         });
     }
     useEffect(() => {
@@ -795,34 +695,21 @@ function TrainingTracker() {
     const benchTM = parseFloat(profile.benchTM) || 0;
     const vdot = parseFloat(profile.vdot) || 0;
     const paces = paceFromVdot(vdot);
-    function completeSession(payload, notes, dateStr) {
-        const entry = { id: Date.now(), date: entryDate(dateStr), type: nextType, payload, notes: notes || '' };
+    function completeSession(payload, dateStr) {
+        const entry = { id: Date.now(), date: entryDate(dateStr), type: nextType, payload, notes: '' };
         persistLog([entry, ...log]);
         const next = { ...progress, sessionsThisWeek: Math.min(4, progress.sessionsThisWeek + 1) };
-        if (nextType === 1 && progress.cycleWeek === 0) {
-            next.lastWeek1RPEStrength = {
-                squat: payload.lifts?.squat?.topRPE ?? null,
-                bench: payload.lifts?.bench?.topRPE ?? null,
-            };
-            next.lastWeek1CycleStrength = progress.cycleCount;
-        }
-        if (nextType === 1 && progress.cycleWeek === 2) {
-            next.lastWeek3RPEStrength = {
-                squat: payload.lifts?.squat?.topRPE ?? null,
-                bench: payload.lifts?.bench?.topRPE ?? null,
-            };
-            next.lastWeek3CycleStrength = progress.cycleCount;
-        }
-        if (nextType === 2 && progress.cycleWeek === 2) {
-            next.lastWeek3RPEStamina = payload.intervalRPE ?? null;
-            next.lastWeek3CycleStamina = progress.cycleCount;
-        }
+        // Week 3 completions are what unlock the automatic TM / VDOT increase.
+        if (nextType === 1 && progress.cycleWeek === 2)
+            next.week3DoneStrength = progress.cycleCount;
+        if (nextType === 2 && progress.cycleWeek === 2)
+            next.week3DoneStamina = progress.cycleCount;
         persistProgress(next);
     }
     // Extra/optional work once the week's 4 sessions are done — logged for
     // the record but doesn't advance the rotation or the cycle.
-    function completeExtra(payload, notes, dateStr) {
-        const entry = { id: Date.now(), date: entryDate(dateStr), type: 'extra', payload, notes: notes || '' };
+    function completeExtra(payload, dateStr) {
+        const entry = { id: Date.now(), date: entryDate(dateStr), type: 'extra', payload, notes: '' };
         persistLog([entry, ...log]);
     }
     // Log a session for a type/week other than what's live right now (e.g.
@@ -830,13 +717,13 @@ function TrainingTracker() {
     // to Week 3). Recorded in history but does NOT touch sessionsThisWeek,
     // cycleWeek, or automatic TM/VDOT progression — use the manual overrides
     // in Setup if a backfilled entry should also shift those.
-    function completeBackfill(type, weekIdx, payload, notes, dateStr) {
+    function completeBackfill(type, weekIdx, payload, dateStr) {
         const entry = {
             id: Date.now(),
             date: entryDate(dateStr),
             type,
             payload,
-            notes: notes || '',
+            notes: '',
             backfilled: true,
         };
         persistLog([entry, ...log]);
@@ -871,7 +758,7 @@ function TrainingTracker() {
                 React.createElement(TabButton, { active: tab === 'log', onClick: () => setTab('log'), icon: ClipboardList }, "Log"),
                 React.createElement(TabButton, { active: tab === 'progress', onClick: () => setTab('progress'), icon: TrendingUp }, "Progress"),
                 React.createElement(TabButton, { active: tab === 'setup', onClick: () => setTab('setup'), icon: Settings }, "Setup")),
-            tab === 'today' && (React.createElement(TodayTab, { nextType: nextType, cycleWeek: progress.cycleWeek, cycleCount: progress.cycleCount, progress: progress, squatRepCapacity: profile.squatRepCapacity || 'lower', benchRepCapacity: profile.benchRepCapacity || 'lower', weekStartDay: profile.weekStartDay ?? 1, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, sessionsThisWeek: progress.sessionsThisWeek, weekMonday: progress.weekMonday, onComplete: completeSession, onCompleteExtra: completeExtra, onCompleteBackfill: completeBackfill, onSkip: skipSession, onSetRepCapacity: (lift, value) => persistProfile({ ...profile, [`${lift}RepCapacity`]: value }) })),
+            tab === 'today' && (React.createElement(TodayTab, { nextType: nextType, cycleWeek: progress.cycleWeek, cycleCount: progress.cycleCount, squatRepCapacity: profile.squatRepCapacity || 'lower', benchRepCapacity: profile.benchRepCapacity || 'lower', weekStartDay: profile.weekStartDay ?? 1, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, sessionsThisWeek: progress.sessionsThisWeek, weekMonday: progress.weekMonday, onComplete: completeSession, onCompleteExtra: completeExtra, onCompleteBackfill: completeBackfill, onSkip: skipSession })),
             tab === 'log' && React.createElement(LogTab, { log: log, onDelete: deleteEntry }),
             tab === 'progress' && React.createElement(ProgressTab, { log: log, maxHistory: maxHistory, weekStartDay: profile.weekStartDay ?? 1 }),
             tab === 'setup' && (React.createElement(SetupTab, { profile: profile, onSave: saveProfileManual, progress: progress, onUpdateProgress: (patch) => persistProgress({ ...progress, ...patch }), resetArmed: resetArmed, setResetArmed: setResetArmed, onReset: () => { persistProgress({ ...progress, weekMonday: weekAnchorOf(new Date(), profile.weekStartDay ?? 1), sessionsThisWeek: 0 }); setResetArmed(false); }, onRerunSetup: () => setShowOnboarding(true) })))));
@@ -879,7 +766,7 @@ function TrainingTracker() {
 /* ---------------------------------------------------------------------
    TODAY TAB
 --------------------------------------------------------------------- */
-function TodayTab({ nextType, cycleWeek, cycleCount, progress, squatRepCapacity, benchRepCapacity, weekStartDay, squatTM, benchTM, vdot, paces, sessionsThisWeek, weekMonday, onComplete, onCompleteExtra, onCompleteBackfill, onSkip, onSetRepCapacity }) {
+function TodayTab({ nextType, cycleWeek, cycleCount, squatRepCapacity, benchRepCapacity, weekStartDay, squatTM, benchTM, vdot, paces, sessionsThisWeek, weekMonday, onComplete, onCompleteExtra, onCompleteBackfill, onSkip }) {
     const needsLifts = nextType === 1 && (!squatTM || !benchTM);
     const needsRun = (nextType === 2 || nextType === 4) && !vdot;
     const needsBoth = nextType === 3 && (!squatTM || !benchTM || !vdot);
@@ -890,7 +777,7 @@ function TodayTab({ nextType, cycleWeek, cycleCount, progress, squatRepCapacity,
         needsLifts && React.createElement(SetupNudge, { text: "Set your Bench and Squat training maxes in Setup to see today's numbers." }),
         needsRun && React.createElement(SetupNudge, { text: "Set your VDOT in Setup to see today's paces." }),
         needsBoth && React.createElement(SetupNudge, { text: "Session 3 uses both training maxes and VDOT \u2014 set both in Setup to see today's numbers." }),
-        nextType === 1 && !needsLifts && (React.createElement(Session1, { weekIdx: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: onComplete, progress: progress, onSetRepCapacity: onSetRepCapacity })),
+        nextType === 1 && !needsLifts && (React.createElement(Session1, { weekIdx: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: onComplete })),
         nextType === 2 && !needsRun && React.createElement(Session2, { weekIdx: cycleWeek, vdot: vdot, onComplete: onComplete }),
         nextType === 3 && !needsBoth && (React.createElement(Session3, { squatTM: squatTM, benchTM: benchTM, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, vdot: vdot, paces: paces, onComplete: onComplete })),
         nextType === 4 && !needsRun && (React.createElement(EasyRun, { paces: paces, onComplete: onComplete, label: SESSION_LABEL[4], contextNote: "Best placed the day after Session 3. Check cardiac drift (~5% or less in the first hour) afterward to confirm the effort stayed easy." })),
@@ -916,8 +803,8 @@ function BackfillPanel({ cycleWeek, squatRepCapacity, benchRepCapacity, squatTM,
         { type: 3, label: 'Stamina' },
         { type: 4, label: 'Endurance' },
     ];
-    function handleComplete(payload, notes, dateStr) {
-        onComplete(type, weekIdx, payload, notes, dateStr);
+    function handleComplete(payload, dateStr) {
+        onComplete(type, weekIdx, payload, dateStr);
     }
     const backfillLabel = (type === 1 || type === 2)
         ? `Backfill · ${SESSION_LABEL[type]} (Week ${weekIdx + 1} — ${STRENGTH_WEEKS[weekIdx].name})`
@@ -932,43 +819,58 @@ function BackfillPanel({ cycleWeek, squatRepCapacity, benchRepCapacity, squatTM,
                 w + 1,
                 " \u2014 ",
                 STRENGTH_WEEKS[w].name))))),
-            type === 1 && React.createElement(Session1, { weekIdx: weekIdx, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: handleComplete, label: backfillLabel }),
-            type === 2 && React.createElement(Session2, { weekIdx: weekIdx, vdot: vdot, onComplete: handleComplete, label: backfillLabel }),
-            type === 3 && React.createElement(Session3, { squatTM: squatTM, benchTM: benchTM, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, vdot: vdot, paces: paces, onComplete: handleComplete, label: backfillLabel }),
-            type === 4 && React.createElement(EasyRun, { paces: paces, onComplete: handleComplete, label: backfillLabel, contextNote: "Backfilled entry \u2014 logged for the record." })))));
+            type === 1 && React.createElement(Session1, { weekIdx: weekIdx, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: handleComplete, label: backfillLabel, showDate: true }),
+            type === 2 && React.createElement(Session2, { weekIdx: weekIdx, vdot: vdot, onComplete: handleComplete, label: backfillLabel, showDate: true }),
+            type === 3 && React.createElement(Session3, { squatTM: squatTM, benchTM: benchTM, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, vdot: vdot, paces: paces, onComplete: handleComplete, label: backfillLabel, showDate: true }),
+            type === 4 && React.createElement(EasyRun, { paces: paces, onComplete: handleComplete, label: backfillLabel, contextNote: "Backfilled entry \u2014 logged for the record.", showDate: true })))));
 }
 /* ---- Session 1: Strength — Accumulation/Transmutation/Realization wave ---- */
-function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchTM, onComplete, label, progress, onSetRepCapacity }) {
+// One tappable set row: tap to tick it off so you can see which set you're on.
+function SetRow({ label, weight, reps, done, onToggle }) {
+    return (React.createElement("button", { type: "button", onClick: onToggle, "aria-pressed": done, className: `w-full flex justify-between items-center py-1.5 text-left ${done ? 'opacity-50' : ''}` },
+        React.createElement("span", { className: "flex items-center gap-2 text-sm tt-text-tertiary" },
+            done
+                ? React.createElement(CheckCircle2, { size: 24, className: "tt-accent" })
+                : React.createElement("span", { className: "inline-block w-6 h-6 rounded-full border-2 tt-border-light" }),
+            label),
+        React.createElement("span", { className: `text-xl font-mono ${done ? 'line-through' : ''}` },
+            React.createElement("span", { className: "font-bold tt-accent" },
+                weight,
+                " lb"),
+            React.createElement("span", { className: "tt-text-secondary" },
+                " \u00D7 ",
+                reps))));
+}
+const DEFAULT_BACKOFFS = 2;
+const MAX_BACKOFFS = 10;
+function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchTM, onComplete, label, showDate }) {
     const week = STRENGTH_WEEKS[weekIdx];
     const lifts = [
         { key: 'bench', label: 'Bench', tm: benchTM, repCapacity: benchRepCapacity },
         { key: 'squat', label: 'Squat', tm: squatTM, repCapacity: squatRepCapacity },
     ];
-    const buildDefaults = () => {
-        const obj = {};
-        lifts.forEach((l) => {
-            const rx = strengthPrescription(l.tm, weekIdx, l.repCapacity);
-            obj[l.key] = {
-                topWeight: rx.topWeight,
-                topReps: rx.topReps,
-                topRPE: 'at',
-                backoff1Reps: rx.backoffReps[0],
-                backoff2Reps: rx.backoffReps[1],
-            };
-        });
-        return obj;
-    };
-    const [fields, setFields] = useState(buildDefaults);
-    const [accessories, setAccessories] = useState('');
-    const [notes, setNotes] = useState('');
-    useEffect(() => { setFields(buildDefaults()); }, [weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchTM]); // eslint-disable-line
-    function update(lift, field, value) {
-        setFields((prev) => ({ ...prev, [lift]: { ...prev[lift], [field]: value } }));
+    // Tick-off state is per lift: which sets are done, and how many back-off
+    // sets are listed (default 2, add more when a day calls for it).
+    const [doneSets, setDoneSets] = useState({});
+    const [backoffCount, setBackoffCount] = useState({ bench: DEFAULT_BACKOFFS, squat: DEFAULT_BACKOFFS });
+    useEffect(() => {
+        setDoneSets({});
+        setBackoffCount({ bench: DEFAULT_BACKOFFS, squat: DEFAULT_BACKOFFS });
+    }, [weekIdx]);
+    const toggleSet = (key) => setDoneSets((prev) => ({ ...prev, [key]: !prev[key] }));
+    function changeBackoffs(lift, delta) {
+        const current = backoffCount[lift];
+        const next = Math.max(1, Math.min(MAX_BACKOFFS, current + delta));
+        if (next === current)
+            return;
+        if (next < current)
+            setDoneSets((prev) => ({ ...prev, [`${lift}:bo${current - 1}`]: false }));
+        setBackoffCount((prev) => ({ ...prev, [lift]: next }));
     }
     function submit(dateStr) {
-        onComplete({ weekIdx, weekName: week.name, squatRepCapacity, benchRepCapacity, lifts: fields, accessories }, notes, dateStr);
-        setNotes('');
-        setAccessories('');
+        onComplete({ weekIdx, weekName: week.name }, dateStr);
+        setDoneSets({});
+        setBackoffCount({ bench: DEFAULT_BACKOFFS, squat: DEFAULT_BACKOFFS });
     }
     return (React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
         React.createElement("div", { className: "flex items-center gap-2 mb-1" },
@@ -980,7 +882,7 @@ function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchT
             " \u00B7 ",
             week.name,
             ' ',
-            React.createElement(Tip, { text: "Top set and both back-off sets use the same weight, per the article \u2014 only reps drop. Target RPE 8.5\u20139 (velocity loss ~30\u201335%) on the top set." })),
+            React.createElement(Tip, { text: "Top set and every back-off set use the same weight, per the article \u2014 only reps drop. Target RPE 8.5\u20139 (velocity loss ~30\u201335%) on the top set. Tap a set to tick it off; add more back-off sets if the day calls for it." })),
         lifts.map((l) => {
             const rx = strengthPrescription(l.tm, weekIdx, l.repCapacity);
             return (React.createElement("div", { key: l.key, className: "mb-3 border-t tt-border pt-3 first:border-0 first:pt-0" },
@@ -993,10 +895,6 @@ function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchT
                         " \u00B7 ",
                         l.repCapacity === 'higher' ? 'Higher' : 'Lower',
                         " capacity")),
-                progress && shouldSuggestHigherCapacity(progress, l.key, l.repCapacity) && (React.createElement("div", { className: "tt-bg-accent-tint border tt-border-accent-dim rounded-lg p-3 mb-2 text-sm tt-text-accent-tint" },
-                    l.label,
-                    " was Below target in Week 1 but caught up to target by Week 3 \u2014 worth trying Higher capacity.",
-                    onSetRepCapacity && (React.createElement("button", { onClick: () => onSetRepCapacity(l.key, 'higher'), className: "block mt-2 font-bold uppercase tracking-wide underline" }, "Switch to Higher")))),
                 React.createElement("div", { className: "mb-2" },
                     React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" }, "Warm-up"),
                     rx.warmups.map((w, i) => (React.createElement("div", { key: i, className: "flex justify-between items-baseline py-0.5" },
@@ -1015,76 +913,21 @@ function Session1({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchT
                             "(",
                             rx.topPct,
                             "%, same weight)")),
-                    React.createElement("div", { className: "flex justify-between items-baseline py-0.5" },
-                        React.createElement("span", { className: "text-sm tt-text-tertiary" }, "Top set"),
-                        React.createElement("span", { className: "text-xl font-mono" },
-                            React.createElement("span", { className: "font-bold tt-accent" },
-                                rx.topWeight,
-                                " lb"),
-                            React.createElement("span", { className: "tt-text-secondary" },
-                                " \u00D7 ",
-                                rx.topReps))),
-                    React.createElement("div", { className: "flex justify-between items-baseline py-0.5" },
-                        React.createElement("span", { className: "text-sm tt-text-tertiary" }, "Back-off 1"),
-                        React.createElement("span", { className: "text-xl font-mono" },
-                            React.createElement("span", { className: "font-bold tt-accent" },
-                                rx.topWeight,
-                                " lb"),
-                            React.createElement("span", { className: "tt-text-secondary" },
-                                " \u00D7 ",
-                                rx.backoffReps[0]))),
-                    React.createElement("div", { className: "flex justify-between items-baseline py-0.5" },
-                        React.createElement("span", { className: "text-sm tt-text-tertiary" }, "Back-off 2"),
-                        React.createElement("span", { className: "text-xl font-mono" },
-                            React.createElement("span", { className: "font-bold tt-accent" },
-                                rx.topWeight,
-                                " lb"),
-                            React.createElement("span", { className: "tt-text-secondary" },
-                                " \u00D7 ",
-                                rx.backoffReps[1])))),
-                React.createElement("div", { className: "grid grid-cols-2 gap-2 mb-2" },
-                    React.createElement(LabeledInput, { big: true, label: "Top set wt", value: fields[l.key]?.topWeight, onChange: (v) => update(l.key, 'topWeight', v) }),
-                    React.createElement(LabeledInput, { label: "Top set reps", value: fields[l.key]?.topReps, onChange: (v) => update(l.key, 'topReps', v) })),
-                React.createElement("div", { className: "mb-2" },
-                    React.createElement(RPESelector, { value: fields[l.key]?.topRPE, onChange: (v) => update(l.key, 'topRPE', v), target: "8.5\u20139" })),
-                React.createElement("div", { className: "grid grid-cols-2 gap-2" },
-                    React.createElement(LabeledInput, { label: `Back-off 1 reps (of ${rx.backoffReps[0]})`, value: fields[l.key]?.backoff1Reps, onChange: (v) => update(l.key, 'backoff1Reps', v) }),
-                    React.createElement(LabeledInput, { label: `Back-off 2 reps (of ${rx.backoffReps[1]})`, value: fields[l.key]?.backoff2Reps, onChange: (v) => update(l.key, 'backoff2Reps', v) }))));
+                    React.createElement(SetRow, { label: "Top set", weight: rx.topWeight, reps: rx.topReps, done: !!doneSets[`${l.key}:top`], onToggle: () => toggleSet(`${l.key}:top`) }),
+                    Array.from({ length: backoffCount[l.key] }, (_, i) => (React.createElement(SetRow, { key: i, label: `Back-off ${i + 1}`, weight: rx.topWeight, reps: rx.backoffReps[i] ?? rx.backoffReps[rx.backoffReps.length - 1], done: !!doneSets[`${l.key}:bo${i}`], onToggle: () => toggleSet(`${l.key}:bo${i}`) }))),
+                    React.createElement("div", { className: "flex items-center gap-2 mt-1" },
+                        React.createElement("button", { onClick: () => changeBackoffs(l.key, 1), disabled: backoffCount[l.key] >= MAX_BACKOFFS, className: "text-sm border tt-border-light tt-text-secondary rounded px-3 py-1.5" }, "+ Back-off set"),
+                        backoffCount[l.key] > 1 && (React.createElement("button", { onClick: () => changeBackoffs(l.key, -1), className: "text-sm border tt-border-light tt-text-tertiary rounded px-3 py-1.5" }, "\u2212 Remove"))))));
         }),
-        React.createElement(LabeledInput, { label: "Accessories (optional \u2014 pull-ups, TGU, planks, carries, etc.)", value: accessories, onChange: setAccessories, full: true }),
-        React.createElement(NotesAndSubmit, { notes: notes, setNotes: setNotes, onSubmit: submit })));
+        React.createElement(DoneButton, { onSubmit: submit, showDate: showDate })));
 }
 /* ---- Session 2: Threshold — VDOT-relative threshold intervals ---- */
-function Session2({ weekIdx, vdot, onComplete, label }) {
+function Session2({ weekIdx, vdot, onComplete, label, showDate }) {
     const week = STAMINA_WEEKS[weekIdx];
     const rx = staminaPrescription(vdot, weekIdx);
     const easyPaces = paceFromVdot(vdot);
-    const [intervalsCompleted, setIntervalsCompleted] = useState(week.reps);
-    const [avgPace, setAvgPace] = useState('');
-    const [distance, setDistance] = useState('');
-    const [durMin, setDurMin] = useState('');
-    const [durSec, setDurSec] = useState('');
-    const [intervalRPE, setIntervalRPE] = useState('at');
-    const [notes, setNotes] = useState('');
-    useEffect(() => { setIntervalsCompleted(week.reps); setIntervalRPE('at'); }, [weekIdx]); // eslint-disable-line
     function submit(dateStr) {
-        onComplete({
-            weekIdx,
-            weekName: week.name,
-            vdotDelta: week.vdotDelta,
-            targetPaceOut: rx.paceOut,
-            targetRPE: week.targetRPE,
-            intervalsCompleted: parseInt(intervalsCompleted, 10),
-            intervalRPE,
-            avgPace,
-            distanceMiles: parseFloat(distance) || null,
-            durationSeconds: (parseFloat(durMin) || 0) * 60 + (parseFloat(durSec) || 0),
-        }, notes, dateStr);
-        setNotes('');
-        setAvgPace('');
-        setDistance('');
-        setDurMin('');
-        setDurSec('');
+        onComplete({ weekIdx, weekName: week.name, targetPaceOut: rx.paceOut }, dateStr);
     }
     return (React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
         React.createElement("div", { className: "flex items-center gap-2 mb-1" },
@@ -1127,24 +970,10 @@ function Session2({ weekIdx, vdot, onComplete, label }) {
                 week.restMin,
                 " min rest \u00D7 ",
                 week.reps)),
-        React.createElement("div", { className: "mb-3" },
-            React.createElement("label", { className: "block mb-2" },
-                React.createElement("span", { className: "text-sm tt-text-secondary block mb-0.5" },
-                    "Intervals completed (of ",
-                    week.reps,
-                    ")"),
-                React.createElement("select", { value: intervalsCompleted, onChange: (e) => setIntervalsCompleted(e.target.value), className: "tt-bg-inset border tt-border-light rounded px-2 py-1.5 text-sm font-mono w-full focus:outline-none tt-focus-accent" }, Array.from({ length: week.reps + 1 }, (_, n) => n).map((n) => React.createElement("option", { key: n, value: n }, n)))),
-            React.createElement(LabeledInput, { label: "Average interval pace (optional)", value: avgPace, onChange: setAvgPace, placeholder: "e.g. 8:05", full: true }),
-            React.createElement("div", { className: "mt-2" },
-                React.createElement(RPESelector, { value: intervalRPE, onChange: setIntervalRPE, target: String(week.targetRPE) }))),
-        React.createElement("div", { className: "grid grid-cols-3 gap-2 mb-2" },
-            React.createElement(LabeledInput, { label: "Distance (mi)", value: distance, onChange: setDistance }),
-            React.createElement(LabeledInput, { label: "Min", value: durMin, onChange: setDurMin }),
-            React.createElement(LabeledInput, { label: "Sec", value: durSec, onChange: setDurSec })),
-        React.createElement(NotesAndSubmit, { notes: notes, setNotes: setNotes, onSubmit: submit })));
+        React.createElement(DoneButton, { onSubmit: submit, showDate: showDate })));
 }
 /* ---- Session 3: Stamina — 1-2-3 ladder EMOM + repetition-pace surges ---- */
-/* ---- EMOM timer: one set every minute, 9 sets, 1-2-3 rep pattern ---- */
+/* ---- EMOM timer: one set every minute, 3 sets per ladder (1-2-3 reps), selectable ladder count ---- */
 function playTone(ctx, freq, duration) {
     if (!ctx)
         return;
@@ -1188,10 +1017,14 @@ function playCountdownBeep(ctx) {
     }
     catch (e) { }
 }
+const MIN_LADDERS = 1;
+const MAX_LADDERS = 8;
 function EMOMTimer() {
     const [lift, setLift] = useState('bench');
+    const [ladders, setLadders] = useState(3);
+    const totalSets = ladders * 3;
     const [running, setRunning] = useState(false);
-    const [currentSet, setCurrentSet] = useState(0); // 0 = prep, 1-9 = sets
+    const [currentSet, setCurrentSet] = useState(0); // 0 = prep, 1..totalSets = sets
     const [secondsLeft, setSecondsLeft] = useState(15);
     const [finished, setFinished] = useState(false);
     const prevSetRef = useRef(0);
@@ -1219,7 +1052,7 @@ function EMOMTimer() {
             setSecondsLeft((s) => {
                 if (s <= 1) {
                     setCurrentSet((set) => {
-                        if (set >= 9) {
+                        if (set >= totalSets) {
                             setFinished(true);
                             setRunning(false);
                             return set;
@@ -1232,7 +1065,7 @@ function EMOMTimer() {
             });
         }, 1000);
         return () => clearInterval(id);
-    }, [running, finished]);
+    }, [running, finished, totalSets]);
     // Transition cue: fires once on every set change, including prep -> Set 1.
     useEffect(() => {
         if (currentSet !== prevSetRef.current) {
@@ -1240,26 +1073,26 @@ function EMOMTimer() {
             playTransitionCue(audioCtxRef.current);
         }
     }, [currentSet]);
-    // 10-second warning ahead of Sets 2-9 (Set 1 already gets its lead-in via
+    // 10-second warning ahead of every set after the first (Set 1 already gets its lead-in via
     // the prep countdown, so it's excluded here). Fires once per set via the
     // warnedSetRef guard, independent of pause/resume toggling.
     useEffect(() => {
-        if (currentSet >= 1 && currentSet <= 8 && secondsLeft === 10 && warnedSetRef.current !== currentSet) {
+        if (currentSet >= 1 && currentSet <= totalSets - 1 && secondsLeft === 10 && warnedSetRef.current !== currentSet) {
             warnedSetRef.current = currentSet;
             playWarningCue(audioCtxRef.current);
         }
-    }, [secondsLeft, currentSet]);
+    }, [secondsLeft, currentSet, totalSets]);
     // 3-2-1 single-beep countdown into Set 1 (end of prep) and into every
-    // subsequent set (end of Sets 1-8). Set 9 has no next set, so it's excluded.
+    // subsequent set. The final set has no next set, so it's excluded.
     useEffect(() => {
-        if (currentSet <= 8 && secondsLeft <= 3 && secondsLeft >= 1) {
+        if (currentSet <= totalSets - 1 && secondsLeft <= 3 && secondsLeft >= 1) {
             const key = `${currentSet}-${secondsLeft}`;
             if (countedRef.current !== key) {
                 countedRef.current = key;
                 playCountdownBeep(audioCtxRef.current);
             }
         }
-    }, [secondsLeft, currentSet]);
+    }, [secondsLeft, currentSet, totalSets]);
     function reset(nextLift) {
         if (nextLift)
             setLift(nextLift);
@@ -1277,17 +1110,42 @@ function EMOMTimer() {
         setRunning((r) => !r);
     }
     const isPrep = currentSet === 0;
-    const isWarning = !isPrep && currentSet <= 8 && secondsLeft <= 10;
+    const isWarning = !isPrep && currentSet <= totalSets - 1 && secondsLeft <= 10;
     const repTarget = isPrep ? null : ((currentSet - 1) % 3) + 1;
+    const currentLadder = isPrep ? null : Math.ceil(currentSet / 3);
+    // Ladder count can only change before the run starts (or after it ends) so
+    // a stray tap mid-set can't wipe the clock.
+    const canChangeLadders = (currentSet === 0 && !running) || finished;
+    function changeLadders(delta) {
+        if (!canChangeLadders)
+            return;
+        setLadders((n) => Math.max(MIN_LADDERS, Math.min(MAX_LADDERS, n + delta)));
+        reset();
+    }
     return (React.createElement("div", { className: "tt-bg-deep border tt-border rounded-lg p-3 mb-3" },
         React.createElement("div", { className: "flex items-center justify-between mb-2" },
             React.createElement("span", { className: "text-xs uppercase tracking-widest tt-text-secondary" }, "EMOM Timer"),
             React.createElement("div", { className: "flex gap-1" },
                 React.createElement("button", { onClick: () => reset('bench'), className: `text-xs px-2 py-1 rounded border ${lift === 'bench' ? 'tt-border-accent tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Bench"),
                 React.createElement("button", { onClick: () => reset('squat'), className: `text-xs px-2 py-1 rounded border ${lift === 'squat' ? 'tt-border-accent tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Squat"))),
+        React.createElement("div", { className: "flex items-center justify-between mb-3" },
+            React.createElement("span", { className: "text-sm tt-text-secondary" },
+                "Ladders ",
+                React.createElement("span", { className: "tt-text-tertiary" },
+                    "(",
+                    totalSets,
+                    " sets / ",
+                    totalSets,
+                    " min)")),
+            React.createElement("div", { className: `flex items-center gap-2 ${canChangeLadders ? '' : 'opacity-40'}` },
+                React.createElement("button", { onClick: () => changeLadders(-1), disabled: !canChangeLadders || ladders <= MIN_LADDERS, className: "w-9 h-9 text-xl font-bold border tt-border-light tt-text-secondary rounded" }, "\u2212"),
+                React.createElement("span", { className: "text-2xl font-mono font-bold tt-accent w-8 text-center" }, ladders),
+                React.createElement("button", { onClick: () => changeLadders(1), disabled: !canChangeLadders || ladders >= MAX_LADDERS, className: "w-9 h-9 text-xl font-bold border tt-border-light tt-text-secondary rounded" }, "+"))),
         finished ? (React.createElement("div", { className: "flex items-center justify-between" },
             React.createElement("div", { className: "tt-success text-sm font-bold" },
-                "All 9 sets complete \u2014 ",
+                "All ",
+                totalSets,
+                " sets complete \u2014 ",
                 lift),
             React.createElement("button", { onClick: () => reset(), className: "text-sm border tt-border-light tt-text-tertiary px-3 py-1.5 rounded" }, "Reset"))) : (React.createElement("div", { className: "flex items-center justify-between" },
             React.createElement("div", null,
@@ -1295,38 +1153,19 @@ function EMOMTimer() {
                     Math.floor(secondsLeft / 60),
                     ":",
                     (secondsLeft % 60).toString().padStart(2, '0')),
-                React.createElement("div", { className: "text-sm tt-text-secondary" }, isPrep ? 'Prep — get in position' : `Set ${currentSet} of 9 · ${repTarget} rep${repTarget > 1 ? 's' : ''}`)),
+                React.createElement("div", { className: "text-sm tt-text-secondary" }, isPrep ? 'Prep — get in position' : `Ladder ${currentLadder} of ${ladders} · Set ${currentSet} of ${totalSets} · ${repTarget} rep${repTarget > 1 ? 's' : ''}`)),
             React.createElement("div", { className: "flex gap-2" },
                 React.createElement("button", { onClick: toggleRunning, className: "text-sm tt-bg-accent-solid tt-text-onaccent font-bold px-3 py-1.5 rounded" }, running ? 'Pause' : 'Start'),
                 React.createElement("button", { onClick: () => reset(), className: "text-sm border tt-border-light tt-text-tertiary px-3 py-1.5 rounded" }, "Reset"))))));
 }
-function Session3({ squatTM, benchTM, squatRepCapacity, benchRepCapacity, vdot, paces, onComplete, label }) {
+function Session3({ squatTM, benchTM, squatRepCapacity, benchRepCapacity, vdot, paces, onComplete, label, showDate }) {
     const pctForCapacity = (cap) => (cap === 'higher' ? 80 : 75);
     const lifts = [
         { key: 'bench', label: 'Bench', tm: benchTM, repCapacity: benchRepCapacity },
         { key: 'squat', label: 'Squat', tm: squatTM, repCapacity: squatRepCapacity },
     ];
-    const buildDefaults = () => ({
-        bench: { weight: tmWeight(benchTM, pctForCapacity(benchRepCapacity)), laddersCompleted: 3, rpe: 'at' },
-        squat: { weight: tmWeight(squatTM, pctForCapacity(squatRepCapacity)), laddersCompleted: 3, rpe: 'at' },
-    });
-    const [fields, setFields] = useState(buildDefaults);
-    const [surgesCompleted, setSurgesCompleted] = useState(8);
-    const [runDistance, setRunDistance] = useState('');
-    const [runDurMin, setRunDurMin] = useState('');
-    const [notes, setNotes] = useState('');
-    useEffect(() => { setFields(buildDefaults()); }, [squatRepCapacity, benchRepCapacity, squatTM, benchTM]); // eslint-disable-line
-    function updateField(lift, field, value) {
-        setFields((prev) => ({ ...prev, [lift]: { ...prev[lift], [field]: value } }));
-    }
     function submit(dateStr) {
-        onComplete({
-            ladder: { targetRPE: 6, fields },
-            surges: { target: 8, completed: surgesCompleted, repPaceOut: paces ? paces.rep.out : null },
-            runDistanceMiles: parseFloat(runDistance) || null,
-            runDurationMin: parseFloat(runDurMin) || null,
-        }, notes, dateStr);
-        setNotes('');
+        onComplete({ repPaceOut: paces ? paces.rep.out : null }, dateStr);
     }
     return (React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
         React.createElement("div", { className: "flex items-center gap-2 mb-1" },
@@ -1337,7 +1176,7 @@ function Session3({ squatTM, benchTM, squatRepCapacity, benchRepCapacity, vdot, 
             ' ',
             React.createElement(Tip, { text: "Stop the ladder early if bar speed or explosiveness noticeably drops \u2014 the stop condition is the article's autoregulation cue, not a fixed rep target." })),
         React.createElement("div", { className: "mb-3" },
-            React.createElement("div", { className: "text-sm font-semibold tt-text-tertiary uppercase tracking-wide mb-2" }, "1-2-3 Ladder \u2014 EMOM, 3 ladders (9 sets / 9 min), RPE 6"),
+            React.createElement("div", { className: "text-sm font-semibold tt-text-tertiary uppercase tracking-wide mb-2" }, "1-2-3 Ladder \u2014 EMOM, RPE 6"),
             React.createElement(EMOMTimer, null),
             lifts.map((l) => {
                 const pct = pctForCapacity(l.repCapacity);
@@ -1373,13 +1212,7 @@ function Session3({ squatTM, benchTM, squatRepCapacity, benchRepCapacity, vdot, 
                                 React.createElement("span", { className: "font-bold tt-accent" },
                                     tmWeight(l.tm, pct),
                                     " lb"),
-                                React.createElement("span", { className: "tt-text-secondary" }, " \u00D7 1-2-3")))),
-                    React.createElement("div", { className: "grid grid-cols-2 gap-2 mb-2" },
-                        React.createElement(LabeledInput, { big: true, label: "Weight used", value: fields[l.key].weight, onChange: (v) => updateField(l.key, 'weight', v) }),
-                        React.createElement("label", { className: "block" },
-                            React.createElement("span", { className: "text-sm tt-text-secondary block mb-0.5" }, "Ladders completed (of 3)"),
-                            React.createElement("select", { value: fields[l.key].laddersCompleted, onChange: (e) => updateField(l.key, 'laddersCompleted', e.target.value), className: "tt-bg-inset border tt-border-light rounded px-2 py-1.5 text-sm font-mono w-full focus:outline-none tt-focus-accent" }, [0, 1, 2, 3].map((n) => React.createElement("option", { key: n, value: n }, n))))),
-                    React.createElement(RPESelector, { value: fields[l.key].rpe, onChange: (v) => updateField(l.key, 'rpe', v), target: "6" })));
+                                React.createElement("span", { className: "tt-text-secondary" }, " \u00D7 1-2-3"))))));
             })),
         React.createElement("div", { className: "mb-3 border-t tt-border pt-3" },
             React.createElement("div", { className: "text-sm font-semibold tt-text-tertiary uppercase tracking-wide mb-2" }, "Repetition-Pace Surges on an Easy Run"),
@@ -1389,31 +1222,13 @@ function Session3({ squatTM, benchTM, squatRepCapacity, benchRepCapacity, vdot, 
                     paces ? fmtPace(paces.rep.out) : '—',
                     "/mi",
                     paces ? ` (${fmtMph(paces.rep.tm)} mph)` : ''),
-                " every 5 min (4.5 min easy between), \u00D7 8, embedded in a continuous easy run."),
-            React.createElement("div", { className: "grid grid-cols-3 gap-2 mb-2" },
-                React.createElement(LabeledInput, { label: "Run distance (mi)", value: runDistance, onChange: setRunDistance }),
-                React.createElement(LabeledInput, { label: "Run duration (min)", value: runDurMin, onChange: setRunDurMin }),
-                React.createElement("label", { className: "block" },
-                    React.createElement("span", { className: "text-sm tt-text-secondary block mb-0.5" }, "Surges (of 8)"),
-                    React.createElement("select", { value: surgesCompleted, onChange: (e) => setSurgesCompleted(e.target.value), className: "tt-bg-inset border tt-border-light rounded px-2 py-1.5 text-sm font-mono w-full focus:outline-none tt-focus-accent" }, Array.from({ length: 9 }, (_, n) => n).map((n) => React.createElement("option", { key: n, value: n }, n)))))),
-        React.createElement(NotesAndSubmit, { notes: notes, setNotes: setNotes, onSubmit: submit })));
+                " every 5 min (4.5 min easy between), \u00D7 8, embedded in a continuous easy run.")),
+        React.createElement(DoneButton, { onSubmit: submit, showDate: showDate })));
 }
 /* ---- Session 4 / Extra: Easy Run — duration & consistency, not pace ---- */
-function EasyRun({ paces, onComplete, label, contextNote }) {
-    const [durMin, setDurMin] = useState('');
-    const [distance, setDistance] = useState('');
-    const [rpe, setRpe] = useState('at');
-    const [notes, setNotes] = useState('');
+function EasyRun({ paces, onComplete, label, contextNote, showDate }) {
     function submit(dateStr) {
-        onComplete({
-            easyPaceOut: paces ? paces.easy.out : null,
-            durationMin: parseFloat(durMin) || null,
-            distanceMiles: parseFloat(distance) || null,
-            rpe,
-        }, notes, dateStr);
-        setDurMin('');
-        setDistance('');
-        setNotes('');
+        onComplete({ easyPaceOut: paces ? paces.easy.out : null }, dateStr);
     }
     return (React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
         React.createElement("div", { className: "flex items-center gap-2 mb-1" },
@@ -1431,12 +1246,7 @@ function EasyRun({ paces, onComplete, label, contextNote }) {
                     paces ? ` (${fmtMph(paces.easy.tm)} mph)` : ''),
                 React.createElement("span", { className: "tt-text-tertiary text-xl" }, " easy")),
             React.createElement("div", { className: "text-base tt-text-tertiary mt-1" }, "RPE 3\u20134 \u00B7 40\u2013300 min (start 30\u201340, extend as fitness allows)")),
-        React.createElement("div", { className: "grid grid-cols-2 gap-2 mb-2" },
-            React.createElement(LabeledInput, { label: "Duration (min)", value: durMin, onChange: setDurMin }),
-            React.createElement(LabeledInput, { label: "Distance (mi, optional)", value: distance, onChange: setDistance })),
-        React.createElement("div", { className: "mb-2" },
-            React.createElement(RPESelector, { value: rpe, onChange: setRpe, target: "3\u20134" })),
-        React.createElement(NotesAndSubmit, { notes: notes, setNotes: setNotes, onSubmit: submit })));
+        React.createElement(DoneButton, { onSubmit: submit, showDate: showDate })));
 }
 /* ---------------------------------------------------------------------
    LOG TAB
@@ -1459,23 +1269,16 @@ function LogTab({ log, onDelete }) {
         React.createElement("button", { onClick: () => onDelete(entry.id), className: "tt-text-tertiary tt-hover-warning p-1" },
             React.createElement(Trash2, { size: 14 })))))));
 }
+// Entries are now just "done" markers; older entries keep their stored data
+// but only the headline is shown.
 function summarize(entry) {
-    const p = entry.payload;
-    if (entry.type === 1) {
-        const s = p.lifts?.squat, b = p.lifts?.bench;
-        return `${p.weekName} — Bench ${b?.topWeight}×${b?.topReps} (${RPE_BAND_LABEL[b?.topRPE] || '—'}), Squat ${s?.topWeight}×${s?.topReps} (${RPE_BAND_LABEL[s?.topRPE] || '—'})`;
-    }
-    if (entry.type === 2) {
-        const target = STAMINA_WEEKS[p.weekIdx]?.reps;
-        return `${p.weekName} — ${p.intervalsCompleted}${target != null ? `/${target}` : ''} intervals${p.targetPaceOut ? ` @ ~${fmtPace(p.targetPaceOut)}/mi` : ''} (${RPE_BAND_LABEL[p.intervalRPE] || '—'})`;
-    }
-    if (entry.type === 3) {
-        const sq = p.ladder?.fields?.squat, be = p.ladder?.fields?.bench;
-        return `Ladders — Bench ${be?.weight} (${be?.laddersCompleted}/3, ${RPE_BAND_LABEL[be?.rpe] || '—'}), Squat ${sq?.weight} (${sq?.laddersCompleted}/3, ${RPE_BAND_LABEL[sq?.rpe] || '—'}) · Surges ${p.surges?.completed}/8`;
-    }
-    if (entry.type === 4 || entry.type === 'extra') {
-        return `${p.durationMin ?? '?'} min${p.distanceMiles ? `, ${p.distanceMiles} mi` : ''} easy (${RPE_BAND_LABEL[p.rpe] || '—'})`;
-    }
+    const p = entry.payload || {};
+    if (entry.type === 1 || entry.type === 2)
+        return p.weekName || 'Completed';
+    if (entry.type === 3)
+        return 'Ladders + surges';
+    if (entry.type === 4 || entry.type === 'extra')
+        return 'Easy run';
     return '';
 }
 /* ---------------------------------------------------------------------
@@ -1662,12 +1465,6 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
                 React.createElement(LabeledInput, { label: "Bench TM (lb)", value: local.benchTM, onChange: (v) => setLocal({ ...local, benchTM: v }) }),
                 React.createElement(LabeledInput, { label: "Squat TM (lb)", value: local.squatTM, onChange: (v) => setLocal({ ...local, squatTM: v }) })),
             React.createElement(LabeledInput, { label: "VDOT", value: local.vdot, onChange: (v) => setLocal({ ...local, vdot: v }), full: true }),
-            (() => {
-                return ['bench', 'squat'].map((lift) => shouldSuggestHigherCapacity(progress, lift, local[`${lift}RepCapacity`]) && (React.createElement("div", { key: lift, className: "tt-bg-accent-tint border tt-border-accent-dim rounded-lg p-3 mt-3 text-sm tt-text-accent-tint" },
-                    lift === 'bench' ? 'Bench' : 'Squat',
-                    " was Below target in Week 1 but caught up to target by Week 3 \u2014 worth trying Higher capacity.",
-                    React.createElement("button", { onClick: () => setLocal({ ...local, [`${lift}RepCapacity`]: 'higher' }), className: "block mt-2 font-bold uppercase tracking-wide underline" }, "Switch to Higher"))));
-            })(),
             React.createElement("div", { className: "mt-3" },
                 React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
                     "Bench rep capacity ",
@@ -1740,7 +1537,7 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
         React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
             React.createElement("h2", { className: "font-bold text-base uppercase tracking-wide mb-2" },
                 "Cycle & Progression ",
-                React.createElement(Tip, { text: "Strength (Session 1) and Threshold (Session 2) advance independently, each on its own Week 3 RPE: at target = +1 row, below target twice in a row = +2 rows, above target twice in a row = hold." })),
+                React.createElement(Tip, { text: `When a 3-week cycle ends, both training maxes go up ${TM_STEP} lb if Week 3's Strength session was completed, and VDOT goes up ${VDOT_STEP} if Week 3's Threshold session was. The two tracks are independent.` })),
             React.createElement("p", { className: "text-base tt-text-tertiary mb-2" },
                 "Cycle ",
                 progress.cycleCount,
@@ -1766,25 +1563,21 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
                     React.createElement("span", { className: "text-sm font-mono tt-text-secondary" }, progress.cycleCount),
                     React.createElement("button", { onClick: () => onUpdateProgress({ cycleCount: progress.cycleCount + 1 }), className: "text-sm border tt-border-light tt-text-tertiary w-6 h-6 rounded" }, "+"))),
             React.createElement("div", { className: "mb-3" },
-                React.createElement("div", { className: "text-xs uppercase tracking-widest tt-text-secondary mb-1" }, "Strength \u2192 Training Max"),
-                progress.lastWeek3RPEStrength && (React.createElement("p", { className: "text-base tt-text-tertiary mb-1" },
-                    "Last Week 3 top-set RPE \u2014 Bench ",
-                    progress.lastWeek3RPEStrength.bench ? RPE_BAND_LABEL[progress.lastWeek3RPEStrength.bench] : '—',
-                    ", Squat ",
-                    progress.lastWeek3RPEStrength.squat ? RPE_BAND_LABEL[progress.lastWeek3RPEStrength.squat] : '—',
-                    " (target 8.5\u20139)")),
-                progress.strengthProgressionNote && (React.createElement("div", { className: `text-base rounded-lg p-3 border ${progress.holdStrength ? 'tt-bg-warning-tint tt-border-warning tt-warning' : 'tt-bg-success-tint tt-border-success tt-success'}` }, progress.strengthProgressionNote))),
+                React.createElement("div", { className: "text-xs uppercase tracking-widest tt-text-secondary mb-1" },
+                    "Strength \u2192 Training Max (+",
+                    TM_STEP,
+                    " lb per cycle)"),
+                progress.strengthProgressionNote && (React.createElement("div", { className: `text-base rounded-lg p-3 border ${progress.strengthAdvanced ? 'tt-bg-success-tint tt-border-success tt-success' : 'tt-bg-warning-tint tt-border-warning tt-warning'}` }, progress.strengthProgressionNote))),
             React.createElement("div", { className: "mb-3" },
-                React.createElement("div", { className: "text-xs uppercase tracking-widest tt-text-secondary mb-1" }, "Threshold \u2192 VDOT"),
-                progress.lastWeek3RPEStamina && (React.createElement("p", { className: "text-base tt-text-tertiary mb-1" },
-                    "Last Week 3 interval RPE \u2014 ",
-                    RPE_BAND_LABEL[progress.lastWeek3RPEStamina] || '—',
-                    " (target 8)")),
-                progress.staminaProgressionNote && (React.createElement("div", { className: `text-base rounded-lg p-3 border ${progress.holdStamina ? 'tt-bg-warning-tint tt-border-warning tt-warning' : 'tt-bg-success-tint tt-border-success tt-success'}` }, progress.staminaProgressionNote))),
+                React.createElement("div", { className: "text-xs uppercase tracking-widest tt-text-secondary mb-1" },
+                    "Threshold \u2192 VDOT (+",
+                    VDOT_STEP,
+                    " per cycle)"),
+                progress.staminaProgressionNote && (React.createElement("div", { className: `text-base rounded-lg p-3 border ${progress.staminaAdvanced ? 'tt-bg-success-tint tt-border-success tt-success' : 'tt-bg-warning-tint tt-border-warning tt-warning'}` }, progress.staminaProgressionNote))),
             React.createElement("p", { className: "text-sm tt-text-tertiary mb-3" },
                 "The cycle advances one week every ",
                 DAY_NAMES[profile.weekStartDay ?? 1],
-                " regardless of adherence; only the weekly 1\u20134 session rotation resets to Session 1. Changes from these rules apply automatically \u2014 adjust the fields above directly if you ever want to override."),
+                " regardless of adherence; only the weekly 1\u20134 session rotation resets to Session 1. Increases apply automatically when the cycle ends \u2014 edit the Training Maxes or VDOT above directly if you ever want to override."),
             !resetArmed ? (React.createElement("button", { onClick: () => setResetArmed(true), className: "text-sm tt-warning border tt-border-warning rounded px-3 py-1.5" }, "Reset this week's rotation to Session 1")) : (React.createElement("div", { className: "flex gap-2" },
                 React.createElement("button", { onClick: onReset, className: "text-sm tt-bg-warning-solid text-white rounded px-3 py-1.5 font-bold" }, "Confirm reset"),
                 React.createElement("button", { onClick: () => setResetArmed(false), className: "text-base tt-text-tertiary border tt-border-light rounded px-3 py-1.5" }, "Cancel")))),
@@ -1793,7 +1586,8 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
             React.createElement("p", { className: "text-sm tt-text-secondary mb-3" }, "Wipes everything stored on this device \u2014 training maxes, history, progress, and cached files \u2014 and reloads to a fresh install. Use this if the app ever seems stuck showing outdated data after an update. This cannot be undone."),
             !clearArmed ? (React.createElement("button", { onClick: () => setClearArmed(true), className: "text-sm tt-warning border tt-border-warning rounded px-3 py-1.5" }, "Clear all app data")) : (React.createElement("div", { className: "flex gap-2" },
                 React.createElement("button", { onClick: clearAppData, className: "text-sm tt-bg-warning-solid text-white rounded px-3 py-1.5 font-bold" }, "Confirm \u2014 erase everything"),
-                React.createElement("button", { onClick: () => setClearArmed(false), className: "text-base tt-text-tertiary border tt-border-light rounded px-3 py-1.5" }, "Cancel"))))));
+                React.createElement("button", { onClick: () => setClearArmed(false), className: "text-base tt-text-tertiary border tt-border-light rounded px-3 py-1.5" }, "Cancel")))),
+        React.createElement("p", { className: "text-xs tt-text-tertiary text-center pt-1" }, "Bearing \u00b7 build " + APP_BUILD)));
 }
 /* ---------------------------------------------------------------------
    MOUNT
