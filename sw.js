@@ -1,11 +1,11 @@
 // Bump CACHE_NAME on every release. The browser byte-compares this file to
 // decide whether a new service worker exists at all, so changing this string
 // is what tells already-installed copies of the app to update.
-const CACHE_NAME = 'bearing-v12';
+const CACHE_NAME = 'bearing-v13';
 const ASSETS = [
   './',
   './index.html',
-  './app.js?v=12',
+  './app.js?v=13',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',

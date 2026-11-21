@@ -11,7 +11,7 @@ const storage = {
     },
 };
 // Shown at the bottom of Setup so it's obvious which build is running after an update.
-const APP_BUILD = '12';
+const APP_BUILD = '13';
 function Icon({ size = 16, className = '', children }) {
     return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", className: className }, children));
 }
@@ -83,28 +83,30 @@ const STRENGTH_WEEKS = [
     { name: 'Transmutation', warmupPct: [50, 60, 70], workReps: 5, backoffReps: 3, backoffSets: 4, topPct: { lower: 80, higher: 82.5 } },
     { name: 'Realization', warmupPct: [50, 60, 70, 80], workReps: 2, backoffReps: 1, backoffSets: 5, topPct: { lower: 90, higher: 90 } },
 ];
-// Straight sets across: one weight for every set; Lower runs 5% under Higher.
+// Straight sets across: one weight for every set; 10% jumps each week,
+// Higher runs 2.5% over Lower (Week 3 capped at 87.5% — Prilepin's 90%+ ceiling).
 const STRAIGHT_WEEKS = [
-    { name: 'Accumulation', pct: { lower: 65, higher: 70 }, reps: 8, sets: 3 },
-    { name: 'Transmutation', pct: { lower: 75, higher: 80 }, reps: 5, sets: 4 },
-    { name: 'Realization', pct: { lower: 85, higher: 90 }, reps: 2, sets: 5 },
+    { name: 'Accumulation', pct: { lower: 65, higher: 67.5 }, reps: 8, sets: 3 },
+    { name: 'Transmutation', pct: { lower: 75, higher: 77.5 }, reps: 5, sets: 4 },
+    { name: 'Realization', pct: { lower: 85, higher: 87.5 }, reps: 2, sets: 5 },
 ];
 /* Ladders + Singles (5TRM / 1TRM EV PS-derived).
    - 2-3-5 ladders; one heavy single straight after every set of 5.
    - Ladder and single loads step up 2.5% a week (like Session 2's
      Threshold -, T, +) while volume falls High -> Medium -> Low, so the
      Week 3 gate lands in the lowest-volume week.
-   - Rep capacity sets loads and volume.
+   - Rep capacity sets the ladder load only; volume (25/20/15) and singles
+     (85/87.5/90) are the same for both, keeping INOL near 1.0 or below.
    - Progression (per lift): pass the Week 3 gate -> TM +2% (rounded to
      5 lb, min 5); fail -> repeat the cycle; two fails in a row -> TM -5%. */
 const LADDER_WEEKS = [
-    { name: 'Accumulation', ladderPct: { lower: 70, higher: 72.5 }, singlePct: { lower: 85, higher: 87.5 } },
-    { name: 'Transmutation', ladderPct: { lower: 72.5, higher: 75 }, singlePct: { lower: 87.5, higher: 90 } },
-    { name: 'Realization', ladderPct: { lower: 75, higher: 77.5 }, singlePct: { lower: 90, higher: 92.5 } },
+    { name: 'Accumulation', ladderPct: { lower: 70, higher: 72.5 }, singlePct: { lower: 85, higher: 85 } },
+    { name: 'Transmutation', ladderPct: { lower: 72.5, higher: 75 }, singlePct: { lower: 87.5, higher: 87.5 } },
+    { name: 'Realization', ladderPct: { lower: 75, higher: 77.5 }, singlePct: { lower: 90, higher: 90 } },
 ];
 const LADDER_VOLUMES = {
     lower: [25, 20, 15],
-    higher: [35, 25, 15],
+    higher: [25, 20, 15],
 };
 const LADDER_TM_UP_PCT = 2;
 const LADDER_TM_DOWN_PCT = 5;
@@ -1674,7 +1676,7 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
             React.createElement("div", { className: "mt-3" },
                 React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
                     "Bench rep capacity ",
-                    React.createElement(Tip, { text: "Sets this lift's Session 1 percentages for every method (Top Set 70/80/90 vs 75/82.5/90; Ladders 70\u201375% vs 72.5\u201377.5% with lower vs higher volume; Straight Sets 65/75/85 vs 70/80/90) and Session 3's ladder % (75% Lower, 80% Higher). If you tend to get more reps at a given %1RM, use Higher." })),
+                    React.createElement(Tip, { text: "Sets this lift's Session 1 percentages for every method (Top Set 70/80/90 vs 75/82.5/90; Ladders 70\u201375% vs 72.5\u201377.5%; Straight Sets 65/75/85 vs 67.5/77.5/87.5) and Session 3's ladder % (75% Lower, 80% Higher). If you tend to get more reps at a given %1RM, use Higher." })),
                 React.createElement("div", { className: "flex gap-2" },
                     React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.benchRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower"),
                     React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.benchRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher"))),
@@ -1712,7 +1714,7 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
                         fails[lift] ? `1 failed gate — another fail lowers the TM ${LADDER_TM_DOWN_PCT}%` : 'no pending fails',
                         fails[lift] ? React.createElement("button", { onClick: () => onUpdateProgress({ ladderFails: { ...fails, [lift]: 0 } }), className: "ml-2 text-xs border tt-border-light tt-text-tertiary rounded px-2 py-0.5" }, "Clear") : null));
                 }))),
-            React.createElement("p", { className: "text-sm tt-text-tertiary mt-2" }, "Each lift's rep capacity (above) sets its percentages for every method, its ladder volume, and Session 3's load.")),
+            React.createElement("p", { className: "text-sm tt-text-tertiary mt-2" }, "Each lift's rep capacity (above) sets its percentages for every method and Session 3's load.")),
         React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
             React.createElement("h2", { className: "font-bold text-base uppercase tracking-wide mb-3" }, "Theme"),
             React.createElement("div", { className: "grid grid-cols-2 gap-2 mb-3" }, Object.entries(THEMES).map(([key, t]) => {
