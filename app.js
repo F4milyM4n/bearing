@@ -11,7 +11,7 @@ const storage = {
     },
 };
 // Shown at the bottom of Setup so it's obvious which build is running after an update.
-const APP_BUILD = '11';
+const APP_BUILD = '12';
 function Icon({ size = 16, className = '', children }) {
     return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", className: className }, children));
 }
@@ -66,33 +66,46 @@ const VDOT_TABLE = [
     [58, 489, 409, 342], [59, 483, 404, 338], [60, 478, 400, 334], [61, 473, 396, 330],
     [62, 468, 392, 326], [63, 463, 388, 322], [64, 459, 385, 318], [65, 455, 382, 314],
 ].map(([v, easy, thr, rep]) => ({ v, easy, thr, rep }));
+/* Session 1 methods. Bench and squat each pick their own method in Setup,
+   and each lift's rep capacity ('lower' | 'higher') sets its percentages
+   for every method (and Session 3's load). */
+const STRENGTH_METHODS = { topset: 'Top Set', ladder: 'Ladders', straight: 'Straight Sets' };
+const DEFAULT_STRENGTH_METHOD = 'topset';
+const capKey = (cap) => (cap === 'higher' ? 'higher' : 'lower');
+// Per-lift method, falling back to the single build 10/11 setting.
+function liftMethod(profile, lift) {
+    const m = profile && (profile[`${lift}Method`] || profile.strengthMethod);
+    return STRENGTH_METHODS[m] ? m : DEFAULT_STRENGTH_METHOD;
+}
+// Top set + back-offs: back-offs use the top-set weight; 3 / 4 / 5 sets.
 const STRENGTH_WEEKS = [
-    { name: 'Accumulation', warmupPct: [50, 60], workReps: 8, backoffReps: [5, 5], topPct: { lower: 70, higher: 75 } },
-    { name: 'Transmutation', warmupPct: [50, 60, 70], workReps: 5, backoffReps: [3, 3], topPct: { lower: 80, higher: 82.5 } },
-    { name: 'Realization', warmupPct: [50, 60, 70, 80], workReps: 2, backoffReps: [1, 1], topPct: { lower: 90, higher: 90 } },
+    { name: 'Accumulation', warmupPct: [50, 60], workReps: 8, backoffReps: 5, backoffSets: 3, topPct: { lower: 70, higher: 75 } },
+    { name: 'Transmutation', warmupPct: [50, 60, 70], workReps: 5, backoffReps: 3, backoffSets: 4, topPct: { lower: 80, higher: 82.5 } },
+    { name: 'Realization', warmupPct: [50, 60, 70, 80], workReps: 2, backoffReps: 1, backoffSets: 5, topPct: { lower: 90, higher: 90 } },
 ];
-/* Session 1 alternative: Ladders + Singles (5TRM / 1TRM EV PS-derived).
-   - Ladder sets of 2-3-5 at a FIXED 75% TM every week; one heavy single
-     straight after every set of 5.
-   - Volume falls linearly High -> Medium -> Low across the wave while the
-     single rises 85 -> 87.5 -> 90%, so Realization (the gate week) is the
-     freshest week.
-   - LADDER_VOLUMES: ladder reps for Weeks 1/2/3 at each Setup volume
-     setting (cycle total 60 / 75 / 90). 75 uses a trailing 2-3 partial.
+// Straight sets across: one weight for every set; Lower runs 5% under Higher.
+const STRAIGHT_WEEKS = [
+    { name: 'Accumulation', pct: { lower: 65, higher: 70 }, reps: 8, sets: 3 },
+    { name: 'Transmutation', pct: { lower: 75, higher: 80 }, reps: 5, sets: 4 },
+    { name: 'Realization', pct: { lower: 85, higher: 90 }, reps: 2, sets: 5 },
+];
+/* Ladders + Singles (5TRM / 1TRM EV PS-derived).
+   - 2-3-5 ladders; one heavy single straight after every set of 5.
+   - Ladder and single loads step up 2.5% a week (like Session 2's
+     Threshold -, T, +) while volume falls High -> Medium -> Low, so the
+     Week 3 gate lands in the lowest-volume week.
+   - Rep capacity sets loads and volume.
    - Progression (per lift): pass the Week 3 gate -> TM +2% (rounded to
      5 lb, min 5); fail -> repeat the cycle; two fails in a row -> TM -5%. */
-const LADDER_PCT = 75;
 const LADDER_WEEKS = [
-    { name: 'Accumulation', ladderPct: LADDER_PCT, singlePct: 85 },
-    { name: 'Transmutation', ladderPct: LADDER_PCT, singlePct: 87.5 },
-    { name: 'Realization', ladderPct: LADDER_PCT, singlePct: 90 },
+    { name: 'Accumulation', ladderPct: { lower: 70, higher: 72.5 }, singlePct: { lower: 85, higher: 87.5 } },
+    { name: 'Transmutation', ladderPct: { lower: 72.5, higher: 75 }, singlePct: { lower: 87.5, higher: 90 } },
+    { name: 'Realization', ladderPct: { lower: 75, higher: 77.5 }, singlePct: { lower: 90, higher: 92.5 } },
 ];
 const LADDER_VOLUMES = {
-    60: [30, 20, 10],
-    75: [35, 25, 15],
-    90: [40, 30, 20],
+    lower: [25, 20, 15],
+    higher: [35, 25, 15],
 };
-const DEFAULT_LADDER_VOLUME = 60;
 const LADDER_TM_UP_PCT = 2;
 const LADDER_TM_DOWN_PCT = 5;
 const ladderTmUp = (tm) => roundTo5(tm + Math.max(5, roundTo5((tm * LADDER_TM_UP_PCT) / 100)));
@@ -102,9 +115,8 @@ const LADDER_WARMUP = [
     { pct: 60, reps: 3 },
 ];
 const DEFAULT_LADDER_FAILS = { bench: 0, squat: 0 };
-// Builds the set order for a given ladder rep total (always a multiple of 5):
-// full 2-3-5 ladders, a trailing 2-3 if 5 reps are left over, and one single
-// right after every set of 5.
+// Set order for a ladder rep total (a multiple of 5): full 2-3-5 ladders,
+// a trailing 2-3 if 5 reps are left over, and one single after every 5.
 function ladderSequence(nl) {
     const sets = [];
     const full = Math.floor(nl / 10);
@@ -120,22 +132,33 @@ function ladderSequence(nl) {
     }
     return sets;
 }
-function ladderPrescription(tm, weekIdx, volume) {
+function ladderPrescription(tm, weekIdx, repCapacity) {
     const w = LADDER_WEEKS[weekIdx];
-    const v = LADDER_VOLUMES[volume] ? volume : DEFAULT_LADDER_VOLUME;
-    const nl = LADDER_VOLUMES[v][weekIdx];
+    const cap = capKey(repCapacity);
+    const nl = LADDER_VOLUMES[cap][weekIdx];
     const sets = ladderSequence(nl);
     return {
         weekName: w.name,
-        volume: v,
         nl,
-        ladderPct: w.ladderPct,
-        ladderWeight: tmWeight(tm, w.ladderPct),
-        singlePct: w.singlePct,
-        singleWeight: tmWeight(tm, w.singlePct),
+        ladderPct: w.ladderPct[cap],
+        ladderWeight: tmWeight(tm, w.ladderPct[cap]),
+        singlePct: w.singlePct[cap],
+        singleWeight: tmWeight(tm, w.singlePct[cap]),
         singles: sets.filter((x) => x.kind === 'single').length,
         warmups: LADDER_WARMUP.map((x) => ({ ...x, weight: tmWeight(tm, x.pct) })),
         sets,
+    };
+}
+function straightPrescription(tm, weekIdx, repCapacity) {
+    const w = STRAIGHT_WEEKS[weekIdx];
+    const pct = w.pct[capKey(repCapacity)];
+    return {
+        weekName: w.name,
+        pct,
+        weight: tmWeight(tm, pct),
+        reps: w.reps,
+        sets: w.sets,
+        warmups: STRENGTH_WEEKS[weekIdx].warmupPct.filter((x) => x < pct).map((x) => ({ pct: x, weight: tmWeight(tm, x), reps: w.reps })),
     };
 }
 // Session 3 warm-up: fixed regardless of week or rep capacity.
@@ -283,7 +306,7 @@ function paceFromVdot(vdot) {
 // (top + both back-offs share the same weight — only reps drop).
 function strengthPrescription(tm, weekIdx, repCapacity) {
     const w = STRENGTH_WEEKS[weekIdx];
-    const topPct = w.topPct[repCapacity];
+    const topPct = w.topPct[capKey(repCapacity)];
     return {
         weekName: w.name,
         warmups: w.warmupPct.map((pct) => ({ pct, weight: tmWeight(tm, pct), reps: w.workReps })),
@@ -291,6 +314,7 @@ function strengthPrescription(tm, weekIdx, repCapacity) {
         topWeight: tmWeight(tm, topPct),
         topReps: w.workReps,
         backoffReps: w.backoffReps,
+        backoffSets: w.backoffSets,
     };
 }
 // Session 2 prescription: threshold pace shifted by the week's VDOT delta.
@@ -553,13 +577,13 @@ function OnboardingScreen({ profile, onComplete }) {
                 React.createElement("div", { className: "mt-3" },
                     React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" }, "Bench rep capacity"),
                     React.createElement("div", { className: "flex gap-2" },
-                        React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.benchRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower (70/80/90)"),
-                        React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.benchRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher (75/82.5/90)"))),
+                        React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.benchRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower"),
+                        React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.benchRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher"))),
                 React.createElement("div", { className: "mt-3" },
                     React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" }, "Squat rep capacity"),
                     React.createElement("div", { className: "flex gap-2" },
-                        React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.squatRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower (70/80/90)"),
-                        React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.squatRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher (75/82.5/90)"))),
+                        React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.squatRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower"),
+                        React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.squatRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher"))),
                 React.createElement("div", { className: "mt-3" },
                     React.createElement("label", { className: "block" },
                         React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" }, "Day 1 (weekly reset day)"),
@@ -572,7 +596,7 @@ function TrainingTracker() {
     const [tab, setTab] = useState('today');
     const [missedWeekPrompt, setMissedWeekPrompt] = useState(null);
     const [showOnboarding, setShowOnboarding] = useState(false);
-    const [profile, setProfile] = useState({ squatTM: '', benchTM: '', vdot: '', squatRepCapacity: 'lower', benchRepCapacity: 'lower', weekStartDay: 1, theme: 'nightvision', strengthMethod: 'topset', ladderVolume: DEFAULT_LADDER_VOLUME });
+    const [profile, setProfile] = useState({ squatTM: '', benchTM: '', vdot: '', squatRepCapacity: 'lower', benchRepCapacity: 'lower', weekStartDay: 1, theme: 'nightvision' });
     const [progress, setProgress] = useState(DEFAULT_PROGRESS);
     const [log, setLog] = useState([]);
     const [maxHistory, setMaxHistory] = useState([]);
@@ -673,77 +697,70 @@ function TrainingTracker() {
         if (wrapping) {
             const strengthDone = progress.week3DoneStrength === cycleCount || progress.lastWeek3CycleStrength === cycleCount;
             const staminaDone = progress.week3DoneStamina === cycleCount || progress.lastWeek3CycleStamina === cycleCount;
-            const ladderMode = profile.strengthMethod === 'ladder';
-            const nextProfileLadder = {};
-            if (ladderMode) {
-                const gate = progress.week3LadderGate && progress.week3LadderGate.cycle === cycleCount ? progress.week3LadderGate : null;
-                const fails = { ...DEFAULT_LADDER_FAILS, ...(progress.ladderFails || {}) };
-                const parts = [];
-                let anyGain = false;
-                if (strengthDone && gate) {
-                    for (const lift of ['bench', 'squat']) {
-                        const name = lift === 'bench' ? 'Bench' : 'Squat';
-                        const key = lift === 'bench' ? 'benchTM' : 'squatTM';
-                        const tm = parseFloat(profile[key]) || 0;
-                        if (gate[lift] === 'pass') {
+            const gate = progress.week3LadderGate && progress.week3LadderGate.cycle === cycleCount ? progress.week3LadderGate : null;
+            const fails = { ...DEFAULT_LADDER_FAILS, ...(progress.ladderFails || {}) };
+            const nextTM = {};
+            const parts = [];
+            let anyGain = false;
+            if (strengthDone) {
+                for (const lift of ['bench', 'squat']) {
+                    const name = lift === 'bench' ? 'Bench' : 'Squat';
+                    const key = lift === 'bench' ? 'benchTM' : 'squatTM';
+                    const tm = parseFloat(profile[key]) || 0;
+                    if (liftMethod(profile, lift) === 'ladder') {
+                        if (!gate || !gate[lift]) {
+                            parts.push(`${name}: no ladder gate result — TM unchanged`);
+                        }
+                        else if (gate[lift] === 'pass') {
                             fails[lift] = 0;
                             const up = ladderTmUp(tm);
-                            nextProfileLadder[key] = String(up);
-                            parts.push(`${name}: passed → TM ${tm} → ${up}`);
+                            nextTM[key] = String(up);
+                            parts.push(`${name}: gate passed → TM ${tm} → ${up}`);
                             anyGain = true;
                         }
                         else {
                             fails[lift] += 1;
                             if (fails[lift] >= 2) {
                                 const down = ladderTmDown(tm);
-                                nextProfileLadder[key] = String(down);
+                                nextTM[key] = String(down);
                                 fails[lift] = 0;
-                                parts.push(`${name}: failed twice → TM ${tm} → ${down} (−${LADDER_TM_DOWN_PCT}%)`);
+                                parts.push(`${name}: gate failed twice → TM ${tm} → ${down} (−${LADDER_TM_DOWN_PCT}%)`);
                             }
                             else {
-                                parts.push(`${name}: failed → repeat at TM ${tm}`);
+                                parts.push(`${name}: gate failed → repeat at TM ${tm}`);
                             }
                         }
                     }
-                    strengthAdvanced = anyGain;
-                    strengthProgressionNote = parts.join(' · ');
+                    else {
+                        const up = roundTo5(tm + TM_STEP);
+                        nextTM[key] = String(up);
+                        parts.push(`${name}: TM ${tm} → ${up}`);
+                        anyGain = true;
+                    }
                 }
-                else {
-                    strengthAdvanced = false;
-                    strengthProgressionNote = strengthDone
-                        ? 'Week 3 Strength was completed without a ladder gate result — training maxes left unchanged.'
-                        : 'Week 3 Strength was not completed last cycle — training maxes left unchanged.';
-                }
-                ladderSummary = parts.join(' · ');
-                ladderUpdate = { ladderFails: fails };
             }
-            else {
-            strengthAdvanced = strengthDone;
+            strengthAdvanced = anyGain;
             strengthProgressionNote = strengthDone
-                ? `Training maxes +${TM_STEP} lb — Week 3 Strength was completed.`
+                ? parts.join(' · ')
                 : 'Week 3 Strength was not completed last cycle — training maxes left unchanged.';
-            }
-            const tmGain = ladderMode ? Object.keys(nextProfileLadder).length > 0 : strengthDone;
+            ladderSummary = parts.join(' · ');
+            ladderUpdate = { ladderFails: fails };
+            const tmGain = Object.keys(nextTM).length > 0;
             staminaAdvanced = staminaDone;
             staminaProgressionNote = staminaDone
                 ? `VDOT +${VDOT_STEP} — Week 3 Threshold was completed.`
                 : 'Week 3 Threshold was not completed last cycle — VDOT left unchanged.';
             if (tmGain || staminaDone) {
                 const nextProfile = { ...profile };
-                if (tmGain && ladderMode) {
-                    Object.assign(nextProfile, nextProfileLadder);
-                }
-                else if (tmGain) {
-                    nextProfile.squatTM = String(roundTo5((parseFloat(profile.squatTM) || 0) + TM_STEP));
-                    nextProfile.benchTM = String(roundTo5((parseFloat(profile.benchTM) || 0) + TM_STEP));
-                }
+                if (tmGain)
+                    Object.assign(nextProfile, nextTM);
                 if (staminaDone) {
                     nextProfile.vdot = String((parseFloat(profile.vdot) || 0) + VDOT_STEP);
                 }
                 persistProfile(nextProfile);
                 const noteParts = [];
                 if (tmGain)
-                    noteParts.push(ladderMode ? `Ladder gate — ${ladderSummary}` : `TM +${TM_STEP} lb`);
+                    noteParts.push(`Strength — ${ladderSummary}`);
                 if (staminaDone)
                     noteParts.push(`VDOT +${VDOT_STEP}`);
                 persistMaxHistory([{
@@ -885,7 +902,7 @@ function TrainingTracker() {
                 React.createElement(TabButton, { active: tab === 'log', onClick: () => setTab('log'), icon: ClipboardList }, "Log"),
                 React.createElement(TabButton, { active: tab === 'progress', onClick: () => setTab('progress'), icon: TrendingUp }, "Progress"),
                 React.createElement(TabButton, { active: tab === 'setup', onClick: () => setTab('setup'), icon: Settings }, "Setup")),
-            tab === 'today' && (React.createElement(TodayTab, { strengthMethod: profile.strengthMethod || 'topset', ladderVolume: profile.ladderVolume || DEFAULT_LADDER_VOLUME, nextType: nextType, cycleWeek: progress.cycleWeek, cycleCount: progress.cycleCount, squatRepCapacity: profile.squatRepCapacity || 'lower', benchRepCapacity: profile.benchRepCapacity || 'lower', weekStartDay: profile.weekStartDay ?? 1, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, sessionsThisWeek: progress.sessionsThisWeek, weekMonday: progress.weekMonday, onComplete: completeSession, onCompleteExtra: completeExtra, onCompleteBackfill: completeBackfill, onSkip: skipSession })),
+            tab === 'today' && (React.createElement(TodayTab, { benchMethod: liftMethod(profile, 'bench'), squatMethod: liftMethod(profile, 'squat'), nextType: nextType, cycleWeek: progress.cycleWeek, cycleCount: progress.cycleCount, squatRepCapacity: profile.squatRepCapacity || 'lower', benchRepCapacity: profile.benchRepCapacity || 'lower', weekStartDay: profile.weekStartDay ?? 1, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, sessionsThisWeek: progress.sessionsThisWeek, weekMonday: progress.weekMonday, onComplete: completeSession, onCompleteExtra: completeExtra, onCompleteBackfill: completeBackfill, onSkip: skipSession })),
             tab === 'log' && React.createElement(LogTab, { log: log, onDelete: deleteEntry }),
             tab === 'progress' && React.createElement(ProgressTab, { log: log, maxHistory: maxHistory, weekStartDay: profile.weekStartDay ?? 1 }),
             tab === 'setup' && (React.createElement(SetupTab, { profile: profile, onSave: saveProfileManual, progress: progress, onUpdateProgress: (patch) => persistProgress({ ...progress, ...patch }), resetArmed: resetArmed, setResetArmed: setResetArmed, onReset: () => { persistProgress({ ...progress, weekMonday: weekAnchorOf(new Date(), profile.weekStartDay ?? 1), sessionsThisWeek: 0 }); setResetArmed(false); }, onRerunSetup: () => setShowOnboarding(true) })))));
@@ -893,7 +910,7 @@ function TrainingTracker() {
 /* ---------------------------------------------------------------------
    TODAY TAB
 --------------------------------------------------------------------- */
-function TodayTab({ strengthMethod, ladderVolume, nextType, cycleWeek, cycleCount, squatRepCapacity, benchRepCapacity, weekStartDay, squatTM, benchTM, vdot, paces, sessionsThisWeek, weekMonday, onComplete, onCompleteExtra, onCompleteBackfill, onSkip }) {
+function TodayTab({ benchMethod, squatMethod, nextType, cycleWeek, cycleCount, squatRepCapacity, benchRepCapacity, weekStartDay, squatTM, benchTM, vdot, paces, sessionsThisWeek, weekMonday, onComplete, onCompleteExtra, onCompleteBackfill, onSkip }) {
     const needsLifts = nextType === 1 && (!squatTM || !benchTM);
     const needsRun = (nextType === 2 || nextType === 4) && !vdot;
     const needsBoth = nextType === 3 && (!squatTM || !benchTM || !vdot);
@@ -904,7 +921,7 @@ function TodayTab({ strengthMethod, ladderVolume, nextType, cycleWeek, cycleCoun
         needsLifts && React.createElement(SetupNudge, { text: "Set your Bench and Squat training maxes in Setup to see today's numbers." }),
         needsRun && React.createElement(SetupNudge, { text: "Set your VDOT in Setup to see today's paces." }),
         needsBoth && React.createElement(SetupNudge, { text: "Session 3 uses both training maxes and VDOT \u2014 set both in Setup to see today's numbers." }),
-        nextType === 1 && !needsLifts && (React.createElement(Session1, { method: strengthMethod, ladderVolume: ladderVolume, weekIdx: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: onComplete })),
+        nextType === 1 && !needsLifts && (React.createElement(Session1, { benchMethod: benchMethod, squatMethod: squatMethod, weekIdx: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: onComplete })),
         nextType === 2 && !needsRun && React.createElement(Session2, { weekIdx: cycleWeek, vdot: vdot, onComplete: onComplete }),
         nextType === 3 && !needsBoth && (React.createElement(Session3, { squatTM: squatTM, benchTM: benchTM, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, vdot: vdot, paces: paces, onComplete: onComplete })),
         nextType === 4 && !needsRun && (React.createElement(EasyRun, { paces: paces, onComplete: onComplete, label: SESSION_LABEL[4], contextNote: "Best placed the day after Session 3. Check cardiac drift (~5% or less in the first hour) afterward to confirm the effort stayed easy." })),
@@ -917,10 +934,10 @@ function TodayTab({ strengthMethod, ladderVolume, nextType, cycleWeek, cycleCoun
         nextType !== null && (React.createElement("div", { className: "mt-3" }, !skipArmed ? (React.createElement("button", { onClick: () => setSkipArmed(true), className: "text-base tt-text-secondary border tt-border rounded px-3 py-1.5" }, "Skip this session (missed it \u2014 don't log anything)")) : (React.createElement("div", { className: "flex gap-2" },
             React.createElement("button", { onClick: () => { onSkip(); setSkipArmed(false); }, className: "text-sm tt-bg-warning-solid text-white rounded px-3 py-1.5 font-bold" }, "Confirm skip"),
             React.createElement("button", { onClick: () => setSkipArmed(false), className: "text-base tt-text-tertiary border tt-border-light rounded px-3 py-1.5" }, "Cancel"))))),
-        React.createElement(BackfillPanel, { strengthMethod: strengthMethod, ladderVolume: ladderVolume, cycleWeek: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, onComplete: onCompleteBackfill })));
+        React.createElement(BackfillPanel, { benchMethod: benchMethod, squatMethod: squatMethod, cycleWeek: cycleWeek, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, vdot: vdot, paces: paces, onComplete: onCompleteBackfill })));
 }
 /* ---- Backfill: log a session for any type/week without touching the live rotation ---- */
-function BackfillPanel({ strengthMethod, ladderVolume, cycleWeek, squatRepCapacity, benchRepCapacity, squatTM, benchTM, vdot, paces, onComplete }) {
+function BackfillPanel({ benchMethod, squatMethod, cycleWeek, squatRepCapacity, benchRepCapacity, squatTM, benchTM, vdot, paces, onComplete }) {
     const [open, setOpen] = useState(false);
     const [type, setType] = useState(1);
     const [weekIdx, setWeekIdx] = useState(cycleWeek);
@@ -946,7 +963,7 @@ function BackfillPanel({ strengthMethod, ladderVolume, cycleWeek, squatRepCapaci
                 w + 1,
                 " \u2014 ",
                 STRENGTH_WEEKS[w].name))))),
-            type === 1 && React.createElement(Session1, { method: strengthMethod, ladderVolume: ladderVolume, weekIdx: weekIdx, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: handleComplete, label: backfillLabel, showDate: true }),
+            type === 1 && React.createElement(Session1, { benchMethod: benchMethod, squatMethod: squatMethod, weekIdx: weekIdx, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, squatTM: squatTM, benchTM: benchTM, onComplete: handleComplete, label: backfillLabel, showDate: true }),
             type === 2 && React.createElement(Session2, { weekIdx: weekIdx, vdot: vdot, onComplete: handleComplete, label: backfillLabel, showDate: true }),
             type === 3 && React.createElement(Session3, { squatTM: squatTM, benchTM: benchTM, squatRepCapacity: squatRepCapacity, benchRepCapacity: benchRepCapacity, vdot: vdot, paces: paces, onComplete: handleComplete, label: backfillLabel, showDate: true }),
             type === 4 && React.createElement(EasyRun, { paces: paces, onComplete: handleComplete, label: backfillLabel, contextNote: "Backfilled entry \u2014 logged for the record.", showDate: true })))));
@@ -968,129 +985,111 @@ function SetRow({ label, weight, reps, done, onToggle }) {
                 " \u00D7 ",
                 reps))));
 }
-const DEFAULT_BACKOFFS = 2;
-const MAX_BACKOFFS = 10;
-function Session1(props) {
-    if (props.method === 'ladder')
-        return React.createElement(Session1Ladder, props);
-    return React.createElement(Session1TopSet, props);
-}
-function Session1TopSet({ weekIdx, squatRepCapacity, benchRepCapacity, squatTM, benchTM, onComplete, label, showDate }) {
-    const week = STRENGTH_WEEKS[weekIdx];
-    const lifts = [
-        { key: 'bench', label: 'Bench', tm: benchTM, repCapacity: benchRepCapacity },
-        { key: 'squat', label: 'Squat', tm: squatTM, repCapacity: squatRepCapacity },
-    ];
-    // Tick-off state is per lift: which sets are done, and how many back-off
-    // sets are listed (default 2, add more when a day calls for it).
-    const [doneSets, setDoneSets] = useState({});
-    const [backoffCount, setBackoffCount] = useState({ bench: DEFAULT_BACKOFFS, squat: DEFAULT_BACKOFFS });
-    useEffect(() => {
-        setDoneSets({});
-        setBackoffCount({ bench: DEFAULT_BACKOFFS, squat: DEFAULT_BACKOFFS });
-    }, [weekIdx]);
-    const toggleSet = (key) => setDoneSets((prev) => ({ ...prev, [key]: !prev[key] }));
-    function changeBackoffs(lift, delta) {
-        const current = backoffCount[lift];
-        const next = Math.max(1, Math.min(MAX_BACKOFFS, current + delta));
-        if (next === current)
-            return;
-        if (next < current)
-            setDoneSets((prev) => ({ ...prev, [`${lift}:bo${current - 1}`]: false }));
-        setBackoffCount((prev) => ({ ...prev, [lift]: next }));
-    }
-    function submit(dateStr) {
-        onComplete({ weekIdx, weekName: week.name, method: 'topset' }, dateStr);
-        setDoneSets({});
-        setBackoffCount({ bench: DEFAULT_BACKOFFS, squat: DEFAULT_BACKOFFS });
-    }
-    return (React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
-        React.createElement("div", { className: "flex items-center gap-2 mb-1" },
-            React.createElement(Dumbbell, { size: 16, className: "tt-accent" }),
-            React.createElement("h2", { className: "font-bold text-base uppercase tracking-wide" }, label || SESSION_LABEL[1])),
-        React.createElement("p", { className: "text-base tt-text-secondary mb-3" },
-            "Week ",
-            weekIdx + 1,
-            " \u00B7 ",
-            week.name,
-            ' ',
-            React.createElement(Tip, { text: "Top set and every back-off set use the same weight, per the article \u2014 only reps drop. Target RPE 8.5\u20139 (velocity loss ~30\u201335%) on the top set. Tap a set to tick it off; add more back-off sets if the day calls for it." })),
-        lifts.map((l) => {
-            const rx = strengthPrescription(l.tm, weekIdx, l.repCapacity);
-            return (React.createElement("div", { key: l.key, className: "mb-3 border-t tt-border pt-3 first:border-0 first:pt-0" },
-                React.createElement("div", { className: "text-sm font-semibold tt-text-secondary mb-1" },
-                    l.label,
-                    " ",
-                    React.createElement("span", { className: "tt-text-tertiary font-normal" },
-                        "TM ",
-                        l.tm,
-                        " \u00B7 ",
-                        l.repCapacity === 'higher' ? 'Higher' : 'Lower',
-                        " capacity")),
-                React.createElement("div", { className: "mb-2" },
-                    React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" }, "Warm-up"),
-                    rx.warmups.map((w, i) => (React.createElement("div", { key: i, className: "flex justify-between items-baseline py-0.5" },
-                        React.createElement("span", { className: "text-sm tt-text-tertiary" },
-                            "Set ",
-                            i + 1),
-                        React.createElement("span", { className: "text-xl font-mono" },
-                            React.createElement("span", { className: "font-bold tt-accent" }, w.weight),
-                            React.createElement("span", { className: "tt-text-secondary" },
-                                " \u00D7 ",
-                                w.reps)))))),
-                React.createElement("div", { className: "mb-2" },
-                    React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" },
-                        "Work ",
-                        React.createElement("span", { className: "normal-case tt-text-tertiary" },
-                            "(",
-                            rx.topPct,
-                            "%, same weight)")),
-                    React.createElement(SetRow, { label: "Top set", weight: rx.topWeight, reps: rx.topReps, done: !!doneSets[`${l.key}:top`], onToggle: () => toggleSet(`${l.key}:top`) }),
-                    Array.from({ length: backoffCount[l.key] }, (_, i) => (React.createElement(SetRow, { key: i, label: `Back-off ${i + 1}`, weight: rx.topWeight, reps: rx.backoffReps[i] ?? rx.backoffReps[rx.backoffReps.length - 1], done: !!doneSets[`${l.key}:bo${i}`], onToggle: () => toggleSet(`${l.key}:bo${i}`) }))),
-                    React.createElement("div", { className: "flex items-center gap-2 mt-1" },
-                        React.createElement("button", { onClick: () => changeBackoffs(l.key, 1), disabled: backoffCount[l.key] >= MAX_BACKOFFS, className: "text-sm border tt-border-light tt-text-secondary rounded px-3 py-1.5" }, "+ Back-off set"),
-                        backoffCount[l.key] > 1 && (React.createElement("button", { onClick: () => changeBackoffs(l.key, -1), className: "text-sm border tt-border-light tt-text-tertiary rounded px-3 py-1.5" }, "\u2212 Remove"))))));
-        }),
-        React.createElement(DoneButton, { onSubmit: submit, showDate: showDate })));
-}
-/* ---- Session 1 (alternative): Ladders + Singles ---- */
+const METHOD_TIPS = {
+    topset: "Top set and every back-off use the same weight — only reps drop. Target RPE 8.5–9 (velocity loss ~30–35%) on the top set.",
+    ladder: "Ladders stay far from failure — a set of 5 should feel like you had several more in you. Rest long between sets, especially before each 5. Each heavy single goes right after its set of 5. Alternating bench and squat sets saves time.",
+    straight: "Every set uses the same weight. Rest as long as you need to keep every rep clean.",
+};
 function GateChoice({ value, onChange }) {
     const btn = (v, text, on) => React.createElement("button", { type: "button", onClick: () => onChange(v), className: `text-sm px-3 py-1.5 rounded border ${value === v ? on : 'tt-border-light tt-text-secondary'}` }, text);
     return (React.createElement("div", { className: "flex gap-2" },
         btn('pass', 'Pass', 'tt-border-success tt-bg-success-tint tt-success'),
         btn('fail', 'Fail', 'tt-border-warning tt-bg-warning-tint tt-warning')));
 }
-function Session1Ladder({ weekIdx, ladderVolume, squatTM, benchTM, onComplete, label, showDate }) {
-    const week = LADDER_WEEKS[weekIdx];
+function WarmupList({ warmups }) {
+    return (React.createElement("div", { className: "mb-2" },
+        React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" }, "Warm-up"),
+        warmups.map((w, i) => (React.createElement("div", { key: i, className: "flex justify-between items-baseline py-0.5" },
+            React.createElement("span", { className: "text-sm tt-text-tertiary" },
+                "Set ",
+                i + 1),
+            React.createElement("span", { className: "text-xl font-mono" },
+                React.createElement("span", { className: "font-bold tt-accent" }, w.weight),
+                React.createElement("span", { className: "tt-text-secondary" },
+                    " × ",
+                    w.reps)))))));
+}
+function WorkHeader({ children }) {
+    return React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" },
+        "Work ",
+        React.createElement("span", { className: "normal-case tt-text-tertiary" }, children));
+}
+// Session 1: each lift renders with its own method (Top Set, Ladders,
+// Straight Sets). Ladder lifts get a Week 3 pass/fail gate.
+function Session1({ weekIdx, benchMethod, squatMethod, squatRepCapacity, benchRepCapacity, squatTM, benchTM, onComplete, label, showDate }) {
+    const weekName = STRENGTH_WEEKS[weekIdx].name;
     const isGateWeek = weekIdx === 2;
     const lifts = [
-        { key: 'bench', label: 'Bench', tm: benchTM },
-        { key: 'squat', label: 'Squat', tm: squatTM },
+        { key: 'bench', label: 'Bench', tm: benchTM, cap: capKey(benchRepCapacity), method: STRENGTH_METHODS[benchMethod] ? benchMethod : DEFAULT_STRENGTH_METHOD },
+        { key: 'squat', label: 'Squat', tm: squatTM, cap: capKey(squatRepCapacity), method: STRENGTH_METHODS[squatMethod] ? squatMethod : DEFAULT_STRENGTH_METHOD },
     ];
+    const ladderLifts = lifts.filter((l) => l.method === 'ladder');
     const [doneSets, setDoneSets] = useState({});
     const [extraSingle, setExtraSingle] = useState({ bench: false, squat: false });
     const [gate, setGate] = useState({ bench: null, squat: null });
     const [gateError, setGateError] = useState(false);
-    useEffect(() => {
+    function reset() {
         setDoneSets({});
         setExtraSingle({ bench: false, squat: false });
         setGate({ bench: null, squat: null });
         setGateError(false);
-    }, [weekIdx]);
+    }
+    useEffect(reset, [weekIdx, benchMethod, squatMethod]);
     const toggleSet = (key) => setDoneSets((prev) => ({ ...prev, [key]: !prev[key] }));
+    const row = (l, id, label, weight, reps) => React.createElement(SetRow, { key: id, label: label, weight: weight, reps: reps, done: !!doneSets[`${l.key}:${id}`], onToggle: () => toggleSet(`${l.key}:${id}`) });
     function submit(dateStr) {
-        if (isGateWeek && (!gate.bench || !gate.squat)) {
+        if (isGateWeek && ladderLifts.some((l) => !gate[l.key])) {
             setGateError(true);
             return;
         }
-        const payload = { weekIdx, weekName: week.name, method: 'ladder', ladderVolume: ladderVolume || DEFAULT_LADDER_VOLUME };
-        if (isGateWeek)
-            payload.ladderGate = { bench: gate.bench, squat: gate.squat };
+        const payload = { weekIdx, weekName, methods: { bench: lifts[0].method, squat: lifts[1].method } };
+        if (isGateWeek && ladderLifts.length) {
+            payload.ladderGate = {};
+            ladderLifts.forEach((l) => { payload.ladderGate[l.key] = gate[l.key]; });
+        }
         onComplete(payload, dateStr);
-        setDoneSets({});
-        setExtraSingle({ bench: false, squat: false });
-        setGate({ bench: null, squat: null });
-        setGateError(false);
+        reset();
+    }
+    function work(l) {
+        if (l.method === 'ladder') {
+            const rx = ladderPrescription(l.tm, weekIdx, l.cap);
+            const optionalSingle = isGateWeek && rx.singles === 1;
+            return [
+                React.createElement(WarmupList, { key: "wu", warmups: rx.warmups }),
+                React.createElement("div", { key: "work", className: "mb-2" },
+                    React.createElement(WorkHeader, null, `(ladders ${rx.ladderPct}%, singles ${rx.singlePct}% · ${rx.nl} ladder reps + ${rx.singles} ${rx.singles === 1 ? 'single' : 'singles'})`),
+                    rx.sets.map((x, i) => (x.kind === 'single'
+                        ? row(l, `s${i}`, `Single (${rx.singlePct}%)`, rx.singleWeight, 1)
+                        : row(l, `s${i}`, `Ladder ${x.ladder}`, rx.ladderWeight, x.reps))),
+                    optionalSingle && (extraSingle[l.key]
+                        ? row(l, 'extra', `Optional single (${rx.singlePct}%)`, rx.singleWeight, 1)
+                        : React.createElement("button", { onClick: () => setExtraSingle((p) => ({ ...p, [l.key]: true })), className: "text-sm border tt-border-light tt-text-secondary rounded px-3 py-1.5 mt-1" }, "+ Second single (only if the first was RPE 7.5 or lower)"))),
+                isGateWeek && (React.createElement("div", { key: "gate", className: "mt-2 tt-bg-deep border tt-border rounded-lg p-3" },
+                    React.createElement("div", { className: "text-sm tt-text-secondary mb-2" },
+                        "Week 3 gate — ",
+                        l.label,
+                        " ",
+                        React.createElement(Tip, { text: `Pass only if BOTH are true: (1) every prescribed ladder rep was done with no set of 5 harder than about RPE 7 (or past the velocity loss your chart gives RPE 7), and (2) the ${rx.singlePct}% single was RPE 8 or lower (or at least your baseline velocity for that weight). Pass raises that lift's TM about ${LADDER_TM_UP_PCT}%; fail repeats the cycle at the same TM; two fails in a row lowers the TM ${LADDER_TM_DOWN_PCT}%.` })),
+                    React.createElement(GateChoice, { value: gate[l.key], onChange: (v) => { setGate((p) => ({ ...p, [l.key]: v })); setGateError(false); } }))),
+            ];
+        }
+        if (l.method === 'straight') {
+            const rx = straightPrescription(l.tm, weekIdx, l.cap);
+            return [
+                React.createElement(WarmupList, { key: "wu", warmups: rx.warmups }),
+                React.createElement("div", { key: "work", className: "mb-2" },
+                    React.createElement(WorkHeader, null, `(${rx.pct}%, ${rx.sets} × ${rx.reps})`),
+                    Array.from({ length: rx.sets }, (_, i) => row(l, `st${i}`, `Set ${i + 1}`, rx.weight, rx.reps))),
+            ];
+        }
+        const rx = strengthPrescription(l.tm, weekIdx, l.cap);
+        return [
+            React.createElement(WarmupList, { key: "wu", warmups: rx.warmups }),
+            React.createElement("div", { key: "work", className: "mb-2" },
+                React.createElement(WorkHeader, null, `(${rx.topPct}%, same weight)`),
+                row(l, 'top', 'Top set', rx.topWeight, rx.topReps),
+                Array.from({ length: rx.backoffSets }, (_, i) => row(l, `bo${i}`, `Back-off ${i + 1}`, rx.topWeight, rx.backoffReps))),
+        ];
     }
     return (React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
         React.createElement("div", { className: "flex items-center gap-2 mb-1" },
@@ -1100,63 +1099,22 @@ function Session1Ladder({ weekIdx, ladderVolume, squatTM, benchTM, onComplete, l
             "Week ",
             weekIdx + 1,
             " · ",
-            week.name,
-            " · Ladders + Singles ",
-            React.createElement(Tip, { text: "Ladders stay far from failure — a set of 5 should feel like you had several more in you. Rest long between sets, especially before each 5. Each heavy single goes right after its set of 5. Alternating bench and squat sets saves time." })),
-        lifts.map((l) => {
-            const rx = ladderPrescription(l.tm, weekIdx, ladderVolume);
-            const optionalSingle = isGateWeek && rx.singles === 1;
-            let setNo = 0;
-            return (React.createElement("div", { key: l.key, className: "mb-3 border-t tt-border pt-3 first:border-0 first:pt-0" },
-                React.createElement("div", { className: "text-sm font-semibold tt-text-secondary mb-1" },
-                    l.label,
-                    " ",
-                    React.createElement("span", { className: "tt-text-tertiary font-normal" },
-                        "TM ",
-                        l.tm,
-                        " · ",
-                        rx.nl,
-                        " ladder reps + ",
-                        rx.singles,
-                        rx.singles === 1 ? " single" : " singles")),
-                React.createElement("div", { className: "mb-2" },
-                    React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" }, "Warm-up"),
-                    rx.warmups.map((w, i) => (React.createElement("div", { key: i, className: "flex justify-between items-baseline py-0.5" },
-                        React.createElement("span", { className: "text-sm tt-text-tertiary" },
-                            "Set ",
-                            i + 1),
-                        React.createElement("span", { className: "text-xl font-mono" },
-                            React.createElement("span", { className: "font-bold tt-accent" }, w.weight),
-                            React.createElement("span", { className: "tt-text-secondary" },
-                                " × ",
-                                w.reps)))))),
-                React.createElement("div", { className: "mb-2" },
-                    React.createElement("div", { className: "text-sm tt-text-tertiary uppercase tracking-wide mb-0.5" },
-                        "Work ",
-                        React.createElement("span", { className: "normal-case tt-text-tertiary" },
-                            "(ladders ",
-                            rx.ladderPct,
-                            "%, singles ",
-                            rx.singlePct,
-                            "%)")),
-                    rx.sets.map((x, i) => {
-                        const isSingle = x.kind === 'single';
-                        if (!isSingle)
-                            setNo += 1;
-                        return React.createElement(SetRow, { key: i, label: isSingle ? `Single (${rx.singlePct}%)` : `Ladder ${x.ladder}`, weight: isSingle ? rx.singleWeight : rx.ladderWeight, reps: x.reps, done: !!doneSets[`${l.key}:${i}`], onToggle: () => toggleSet(`${l.key}:${i}`) });
-                    }),
-                    optionalSingle && (extraSingle[l.key]
-                        ? React.createElement(SetRow, { label: `Optional single (${rx.singlePct}%)`, weight: rx.singleWeight, reps: 1, done: !!doneSets[`${l.key}:extra`], onToggle: () => toggleSet(`${l.key}:extra`) })
-                        : React.createElement("button", { onClick: () => setExtraSingle((p) => ({ ...p, [l.key]: true })), className: "text-sm border tt-border-light tt-text-secondary rounded px-3 py-1.5 mt-1" }, "+ Second single (only if the first was RPE 7.5 or lower)"))),
-                isGateWeek && (React.createElement("div", { className: "mt-2 tt-bg-deep border tt-border rounded-lg p-3" },
-                    React.createElement("div", { className: "text-sm tt-text-secondary mb-2" },
-                        "Week 3 gate — ",
-                        l.label,
-                        " ",
-                        React.createElement(Tip, { text: "Pass only if BOTH are true: (1) every prescribed ladder rep was done with no set of 5 harder than about RPE 7 (or past the velocity loss your chart gives RPE 7), and (2) the 90% single was RPE 8 or lower (or at least your baseline velocity for that weight). Pass raises that lift's TM about 2%; fail repeats the cycle at the same TM; two fails in a row lowers the TM 5%." })),
-                    React.createElement(GateChoice, { value: gate[l.key], onChange: (v) => { setGate((p) => ({ ...p, [l.key]: v })); setGateError(false); } })))));
-        }),
-        gateError && (React.createElement("div", { className: "tt-bg-warning-tint border tt-border-warning tt-warning text-sm rounded-lg p-2 mt-2" }, "Mark Pass or Fail for both lifts before logging — the Week 3 gate decides next cycle's step.")),
+            weekName),
+        lifts.map((l) => (React.createElement("div", { key: l.key, className: "mb-3 border-t tt-border pt-3 first:border-0 first:pt-0" },
+            React.createElement("div", { className: "text-sm font-semibold tt-text-secondary mb-1" },
+                l.label,
+                " ",
+                React.createElement("span", { className: "tt-text-tertiary font-normal" },
+                    "TM ",
+                    l.tm,
+                    " · ",
+                    STRENGTH_METHODS[l.method],
+                    " · ",
+                    l.cap === 'higher' ? 'Higher' : 'Lower',
+                    " capacity "),
+                React.createElement(Tip, { text: METHOD_TIPS[l.method] })),
+            work(l)))),
+        gateError && (React.createElement("div", { className: "tt-bg-warning-tint border tt-border-warning tt-warning text-sm rounded-lg p-2 mt-2" }, "Mark Pass or Fail for each ladder lift before logging — the Week 3 gate decides next cycle's TM.")),
         React.createElement(DoneButton, { onSubmit: submit, showDate: showDate })));
 }
 /* ---- Session 2: Threshold — VDOT-relative threshold intervals ---- */
@@ -1511,9 +1469,15 @@ function LogTab({ log, onDelete }) {
 // but only the headline is shown.
 function summarize(entry) {
     const p = entry.payload || {};
-    if (entry.type === 1 && p.method === 'ladder') {
-        const gate = p.ladderGate ? ` · Gate B:${p.ladderGate.bench} S:${p.ladderGate.squat}` : '';
-        return `${p.weekName || 'Completed'} · Ladders${gate}`;
+    if (entry.type === 1 && (p.methods || p.method === 'ladder')) {
+        const name = (m) => STRENGTH_METHODS[m] || m;
+        const methods = p.methods
+            ? (p.methods.bench === p.methods.squat ? name(p.methods.bench) : `B: ${name(p.methods.bench)} · S: ${name(p.methods.squat)}`)
+            : 'Ladders';
+        const gate = p.ladderGate
+            ? ' · Gate ' + Object.entries(p.ladderGate).map(([k, v]) => `${k === 'bench' ? 'B' : 'S'}:${v}`).join(' ')
+            : '';
+        return `${p.weekName || 'Completed'} · ${methods}${gate}`;
     }
     if (entry.type === 1 || entry.type === 2)
         return p.weekName || 'Completed';
@@ -1710,17 +1674,17 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
             React.createElement("div", { className: "mt-3" },
                 React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
                     "Bench rep capacity ",
-                    React.createElement(Tip, { text: "Determines Session 1's top-set % in Weeks 1\u20132 (Week 3 is 90% either way) and Session 3's ladder % (75% Lower, 80% Higher). If you tend to get more reps at a given %1RM, use Higher." })),
+                    React.createElement(Tip, { text: "Sets this lift's Session 1 percentages for every method (Top Set 70/80/90 vs 75/82.5/90; Ladders 70\u201375% vs 72.5\u201377.5% with lower vs higher volume; Straight Sets 65/75/85 vs 70/80/90) and Session 3's ladder % (75% Lower, 80% Higher). If you tend to get more reps at a given %1RM, use Higher." })),
                 React.createElement("div", { className: "flex gap-2" },
-                    React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.benchRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower (70/80/90)"),
-                    React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.benchRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher (75/82.5/90)"))),
+                    React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.benchRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower"),
+                    React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.benchRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher"))),
             React.createElement("div", { className: "mt-3" },
                 React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
                     "Squat rep capacity ",
                     React.createElement(Tip, { text: "Set independently from Bench \u2014 your squat and bench don't have to use the same capacity profile." })),
                 React.createElement("div", { className: "flex gap-2" },
-                    React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.squatRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower (70/80/90)"),
-                    React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.squatRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher (75/82.5/90)"))),
+                    React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.squatRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower"),
+                    React.createElement("button", { onClick: () => setLocal({ ...local, squatRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.squatRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher"))),
             React.createElement("div", { className: "mt-3" },
                 React.createElement("label", { className: "block" },
                     React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
@@ -1731,28 +1695,24 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
         React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
             React.createElement("h2", { className: "font-bold text-base uppercase tracking-wide mb-2" },
                 "Session 1 Method ",
-                React.createElement(Tip, { text: "Top Set: work up to a top set at RPE 8.5–9, then back-offs at the same weight; TMs rise every cycle Week 3 is completed. Ladders + Singles: 2-3-5 ladders at a fixed 75% with volume falling High/Medium/Low and singles rising 85/87.5/90%; passing the Week 3 gate raises the TM about 2%, one fail repeats the cycle, two in a row lower it 5%. Switching takes effect immediately; progression at the cycle's end follows whichever method is selected then." })),
-            React.createElement("div", { className: "flex gap-2 mb-2" },
-                React.createElement("button", { onClick: () => onSave({ ...local, strengthMethod: 'topset' }), className: `text-sm px-3 py-1.5 rounded border ${(local.strengthMethod || 'topset') === 'topset' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Top Set + Back-offs"),
-                React.createElement("button", { onClick: () => onSave({ ...local, strengthMethod: 'ladder' }), className: `text-sm px-3 py-1.5 rounded border ${local.strengthMethod === 'ladder' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Ladders + Singles")),
-            local.strengthMethod === 'ladder' && (React.createElement("div", { className: "tt-bg-deep border tt-border rounded-lg p-3" },
-                React.createElement("div", { className: "text-sm tt-text-secondary mb-2" },
-                    "Volume (ladder reps, Weeks 1 / 2 / 3) ",
-                    React.createElement(Tip, { text: "Fixed setting, not a progression. 60 is the default; 75 adds a 2-3 partial ladder each week; 90 adds a full ladder each week. Progress comes from the TM rising after each passed Week 3 gate." })),
-                React.createElement("div", { className: "flex gap-2 mb-3 flex-wrap" }, Object.keys(LADDER_VOLUMES).map((k) => {
-                    const v = parseInt(k, 10);
-                    const active = (local.ladderVolume || DEFAULT_LADDER_VOLUME) === v;
-                    return React.createElement("button", { key: k, onClick: () => onSave({ ...local, ladderVolume: v }), className: `text-sm px-3 py-1.5 rounded border font-mono ${active ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, LADDER_VOLUMES[k].join(' / '));
-                })),
-                ['bench', 'squat'].map((lift) => {
+                React.createElement(Tip, { text: "Pick a method for each lift. Top Set: top set then 3 / 4 / 5 back-offs at the same weight. Ladders: 2-3-5 ladders with heavy singles, volume falling each week, and a Week 3 pass/fail gate that sets the TM. Straight Sets: 3×8, 4×5, 5×2 at one weight. Top Set and Straight Sets raise the TM 5 lb every cycle Week 3 is completed. Switching takes effect immediately; progression at the cycle's end follows whichever method is selected then." })),
+            ['bench', 'squat'].map((lift) => {
+                const cur = liftMethod(local, lift);
+                return (React.createElement("div", { key: lift, className: "mb-3" },
+                    React.createElement("div", { className: "text-sm tt-text-secondary mb-1" }, lift === 'bench' ? 'Bench' : 'Squat'),
+                    React.createElement("div", { className: "flex gap-2 flex-wrap" }, Object.entries(STRENGTH_METHODS).map(([k, name]) => (React.createElement("button", { key: k, onClick: () => onSave({ ...local, [`${lift}Method`]: k }), className: `text-sm px-3 py-1.5 rounded border ${cur === k ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, name))))));
+            }),
+            ['bench', 'squat'].some((lift) => liftMethod(local, lift) === 'ladder') && (React.createElement("div", { className: "tt-bg-deep border tt-border rounded-lg p-3" },
+                React.createElement("div", { className: "text-sm tt-text-secondary mb-1" }, "Ladder gate status"),
+                ['bench', 'squat'].filter((lift) => liftMethod(local, lift) === 'ladder').map((lift) => {
                     const fails = { ...DEFAULT_LADDER_FAILS, ...(progress.ladderFails || {}) };
                     return (React.createElement("div", { key: lift, className: "text-sm tt-text-tertiary" },
                         lift === 'bench' ? 'Bench' : 'Squat',
                         ": ",
-                        fails[lift] ? '1 failed gate — another fail lowers the TM 5%' : 'no pending fails',
+                        fails[lift] ? `1 failed gate — another fail lowers the TM ${LADDER_TM_DOWN_PCT}%` : 'no pending fails',
                         fails[lift] ? React.createElement("button", { onClick: () => onUpdateProgress({ ladderFails: { ...fails, [lift]: 0 } }), className: "ml-2 text-xs border tt-border-light tt-text-tertiary rounded px-2 py-0.5" }, "Clear") : null));
-                }),
-                React.createElement("p", { className: "text-sm tt-text-tertiary mt-2" }, "Rep capacity doesn't apply to ladders (it still sets Session 3's %).")))),
+                }))),
+            React.createElement("p", { className: "text-sm tt-text-tertiary mt-2" }, "Each lift's rep capacity (above) sets its percentages for every method, its ladder volume, and Session 3's load.")),
         React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
             React.createElement("h2", { className: "font-bold text-base uppercase tracking-wide mb-3" }, "Theme"),
             React.createElement("div", { className: "grid grid-cols-2 gap-2 mb-3" }, Object.entries(THEMES).map(([key, t]) => {
@@ -1830,9 +1790,7 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
                     React.createElement("span", { className: "text-sm font-mono tt-text-secondary" }, progress.cycleCount),
                     React.createElement("button", { onClick: () => onUpdateProgress({ cycleCount: progress.cycleCount + 1 }), className: "text-sm border tt-border-light tt-text-tertiary w-6 h-6 rounded" }, "+"))),
             React.createElement("div", { className: "mb-3" },
-                React.createElement("div", { className: "text-xs uppercase tracking-widest tt-text-secondary mb-1" }, profile.strengthMethod === 'ladder'
-                    ? `Strength \u2192 Ladder gate (TM +${LADDER_TM_UP_PCT}% pass / \u2212${LADDER_TM_DOWN_PCT}% after 2 fails)`
-                    : `Strength \u2192 Training Max (+${TM_STEP} lb per cycle)`),
+                React.createElement("div", { className: "text-xs uppercase tracking-widest tt-text-secondary mb-1" }, `Strength \u2192 Training Max (Top Set / Straight Sets: +${TM_STEP} lb per completed cycle \u00B7 Ladders: +${LADDER_TM_UP_PCT}% on a passed gate)`),
                 progress.strengthProgressionNote && (React.createElement("div", { className: `text-base rounded-lg p-3 border ${progress.strengthAdvanced ? 'tt-bg-success-tint tt-border-success tt-success' : 'tt-bg-warning-tint tt-border-warning tt-warning'}` }, progress.strengthProgressionNote))),
             React.createElement("div", { className: "mb-3" },
                 React.createElement("div", { className: "text-xs uppercase tracking-widest tt-text-secondary mb-1" },
