@@ -11,7 +11,7 @@ const storage = {
     },
 };
 // Shown at the bottom of Setup so it's obvious which build is running after an update.
-const APP_BUILD = '13';
+const APP_BUILD = '14';
 function Icon({ size = 16, className = '', children }) {
     return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", className: className }, children));
 }
@@ -69,6 +69,18 @@ const VDOT_TABLE = [
 /* Session 1 methods. Bench and squat each pick their own method in Setup,
    and each lift's rep capacity ('lower' | 'higher') sets its percentages
    for every method (and Session 3's load). */
+// Lower-body lifts carry less Session 1 volume (running already loads the
+// legs): one fewer back-off / straight set, and 5 fewer ladder reps.
+const LOWER_BODY_LIFTS = { squat: true };
+const isLowerBody = (lift) => !!LOWER_BODY_LIFTS[lift];
+const LOWER_BODY_SET_CUT = 1;
+const LOWER_BODY_LADDER_CUT = 5;
+// Bench progresses in half-steps: a completed (or passed) cycle at Lower
+// capacity moves bench to Higher with the TM held; a completed cycle at
+// Higher raises the TM and returns bench to Lower. Same average rate as
+// +2.5 lb a cycle, without needing 1.25 lb plates. Squat keeps full steps.
+const HALF_STEP_LIFTS = { bench: true };
+const isHalfStep = (lift) => !!HALF_STEP_LIFTS[lift];
 const STRENGTH_METHODS = { topset: 'Top Set', ladder: 'Ladders', straight: 'Straight Sets' };
 const DEFAULT_STRENGTH_METHOD = 'topset';
 const capKey = (cap) => (cap === 'higher' ? 'higher' : 'lower');
@@ -134,10 +146,10 @@ function ladderSequence(nl) {
     }
     return sets;
 }
-function ladderPrescription(tm, weekIdx, repCapacity) {
+function ladderPrescription(tm, weekIdx, repCapacity, lift) {
     const w = LADDER_WEEKS[weekIdx];
     const cap = capKey(repCapacity);
-    const nl = LADDER_VOLUMES[cap][weekIdx];
+    const nl = LADDER_VOLUMES[cap][weekIdx] - (isLowerBody(lift) ? LOWER_BODY_LADDER_CUT : 0);
     const sets = ladderSequence(nl);
     return {
         weekName: w.name,
@@ -151,7 +163,7 @@ function ladderPrescription(tm, weekIdx, repCapacity) {
         sets,
     };
 }
-function straightPrescription(tm, weekIdx, repCapacity) {
+function straightPrescription(tm, weekIdx, repCapacity, lift) {
     const w = STRAIGHT_WEEKS[weekIdx];
     const pct = w.pct[capKey(repCapacity)];
     return {
@@ -159,7 +171,7 @@ function straightPrescription(tm, weekIdx, repCapacity) {
         pct,
         weight: tmWeight(tm, pct),
         reps: w.reps,
-        sets: w.sets,
+        sets: w.sets - (isLowerBody(lift) ? LOWER_BODY_SET_CUT : 0),
         warmups: STRENGTH_WEEKS[weekIdx].warmupPct.filter((x) => x < pct).map((x) => ({ pct: x, weight: tmWeight(tm, x), reps: w.reps })),
     };
 }
@@ -306,7 +318,7 @@ function paceFromVdot(vdot) {
 }
 // Session 1 prescription for one lift: warm-ups + top set + back-offs
 // (top + both back-offs share the same weight — only reps drop).
-function strengthPrescription(tm, weekIdx, repCapacity) {
+function strengthPrescription(tm, weekIdx, repCapacity, lift) {
     const w = STRENGTH_WEEKS[weekIdx];
     const topPct = w.topPct[capKey(repCapacity)];
     return {
@@ -316,7 +328,7 @@ function strengthPrescription(tm, weekIdx, repCapacity) {
         topWeight: tmWeight(tm, topPct),
         topReps: w.workReps,
         backoffReps: w.backoffReps,
-        backoffSets: w.backoffSets,
+        backoffSets: w.backoffSets - (isLowerBody(lift) ? LOWER_BODY_SET_CUT : 0),
     };
 }
 // Session 2 prescription: threshold pace shifted by the week's VDOT delta.
@@ -704,20 +716,36 @@ function TrainingTracker() {
             const nextTM = {};
             const parts = [];
             let anyGain = false;
+            const nextCap = {};
             if (strengthDone) {
                 for (const lift of ['bench', 'squat']) {
                     const name = lift === 'bench' ? 'Bench' : 'Squat';
                     const key = lift === 'bench' ? 'benchTM' : 'squatTM';
+                    const capField = lift === 'bench' ? 'benchRepCapacity' : 'squatRepCapacity';
+                    const cap = capKey(profile[capField]);
                     const tm = parseFloat(profile[key]) || 0;
+                    const half = isHalfStep(lift);
+                    // A successful cycle: half-step lifts at Lower move to Higher
+                    // (TM held); everything else raises the TM.
+                    const advance = (raise) => {
+                        if (half && cap === 'lower') {
+                            nextCap[capField] = 'higher';
+                            parts.push(`${name}: Lower → Higher capacity (TM holds at ${tm})`);
+                            return;
+                        }
+                        const up = raise(tm);
+                        nextTM[key] = String(up);
+                        if (half)
+                            nextCap[capField] = 'lower';
+                        parts.push(`${name}: TM ${tm} → ${up}${half ? ', back to Lower capacity' : ''}`);
+                    };
                     if (liftMethod(profile, lift) === 'ladder') {
                         if (!gate || !gate[lift]) {
                             parts.push(`${name}: no ladder gate result — TM unchanged`);
                         }
                         else if (gate[lift] === 'pass') {
                             fails[lift] = 0;
-                            const up = ladderTmUp(tm);
-                            nextTM[key] = String(up);
-                            parts.push(`${name}: gate passed → TM ${tm} → ${up}`);
+                            advance(ladderTmUp);
                             anyGain = true;
                         }
                         else {
@@ -726,7 +754,9 @@ function TrainingTracker() {
                                 const down = ladderTmDown(tm);
                                 nextTM[key] = String(down);
                                 fails[lift] = 0;
-                                parts.push(`${name}: gate failed twice → TM ${tm} → ${down} (−${LADDER_TM_DOWN_PCT}%)`);
+                                if (half)
+                                    nextCap[capField] = 'lower';
+                                parts.push(`${name}: gate failed twice → TM ${tm} → ${down} (−${LADDER_TM_DOWN_PCT}%)${half ? ', Lower capacity' : ''}`);
                             }
                             else {
                                 parts.push(`${name}: gate failed → repeat at TM ${tm}`);
@@ -734,9 +764,7 @@ function TrainingTracker() {
                         }
                     }
                     else {
-                        const up = roundTo5(tm + TM_STEP);
-                        nextTM[key] = String(up);
-                        parts.push(`${name}: TM ${tm} → ${up}`);
+                        advance((t) => roundTo5(t + TM_STEP));
                         anyGain = true;
                     }
                 }
@@ -747,7 +775,7 @@ function TrainingTracker() {
                 : 'Week 3 Strength was not completed last cycle — training maxes left unchanged.';
             ladderSummary = parts.join(' · ');
             ladderUpdate = { ladderFails: fails };
-            const tmGain = Object.keys(nextTM).length > 0;
+            const tmGain = Object.keys(nextTM).length > 0 || Object.keys(nextCap).length > 0;
             staminaAdvanced = staminaDone;
             staminaProgressionNote = staminaDone
                 ? `VDOT +${VDOT_STEP} — Week 3 Threshold was completed.`
@@ -755,7 +783,7 @@ function TrainingTracker() {
             if (tmGain || staminaDone) {
                 const nextProfile = { ...profile };
                 if (tmGain)
-                    Object.assign(nextProfile, nextTM);
+                    Object.assign(nextProfile, nextTM, nextCap);
                 if (staminaDone) {
                     nextProfile.vdot = String((parseFloat(profile.vdot) || 0) + VDOT_STEP);
                 }
@@ -1054,7 +1082,7 @@ function Session1({ weekIdx, benchMethod, squatMethod, squatRepCapacity, benchRe
     }
     function work(l) {
         if (l.method === 'ladder') {
-            const rx = ladderPrescription(l.tm, weekIdx, l.cap);
+            const rx = ladderPrescription(l.tm, weekIdx, l.cap, l.key);
             const optionalSingle = isGateWeek && rx.singles === 1;
             return [
                 React.createElement(WarmupList, { key: "wu", warmups: rx.warmups }),
@@ -1076,7 +1104,7 @@ function Session1({ weekIdx, benchMethod, squatMethod, squatRepCapacity, benchRe
             ];
         }
         if (l.method === 'straight') {
-            const rx = straightPrescription(l.tm, weekIdx, l.cap);
+            const rx = straightPrescription(l.tm, weekIdx, l.cap, l.key);
             return [
                 React.createElement(WarmupList, { key: "wu", warmups: rx.warmups }),
                 React.createElement("div", { key: "work", className: "mb-2" },
@@ -1084,7 +1112,7 @@ function Session1({ weekIdx, benchMethod, squatMethod, squatRepCapacity, benchRe
                     Array.from({ length: rx.sets }, (_, i) => row(l, `st${i}`, `Set ${i + 1}`, rx.weight, rx.reps))),
             ];
         }
-        const rx = strengthPrescription(l.tm, weekIdx, l.cap);
+        const rx = strengthPrescription(l.tm, weekIdx, l.cap, l.key);
         return [
             React.createElement(WarmupList, { key: "wu", warmups: rx.warmups }),
             React.createElement("div", { key: "work", className: "mb-2" },
@@ -1217,9 +1245,12 @@ function playCountdownBeep(ctx) {
 }
 const MIN_LADDERS = 1;
 const MAX_LADDERS = 8;
+// Default Session 3 ladder count per lift: more pressing volume (running
+// doesn't train it), less squat volume (running already loads the legs).
+const S3_DEFAULT_LADDERS = { bench: 4, squat: 3 };
 function EMOMTimer() {
     const [lift, setLift] = useState('bench');
-    const [ladders, setLadders] = useState(3);
+    const [ladders, setLadders] = useState(S3_DEFAULT_LADDERS.bench);
     const totalSets = ladders * 3;
     const [running, setRunning] = useState(false);
     const [currentSet, setCurrentSet] = useState(0); // 0 = prep, 1..totalSets = sets
@@ -1292,8 +1323,10 @@ function EMOMTimer() {
         }
     }, [secondsLeft, currentSet, totalSets]);
     function reset(nextLift) {
-        if (nextLift)
+        if (nextLift) {
             setLift(nextLift);
+            setLadders(S3_DEFAULT_LADDERS[nextLift] || 3);
+        }
         setRunning(false);
         setFinished(false);
         setCurrentSet(0);
@@ -1405,7 +1438,9 @@ function Session3({ squatTM, benchTM, squatRepCapacity, benchRepCapacity, vdot, 
                             React.createElement("span", { className: "text-sm tt-text-tertiary" },
                                 "Ladder (",
                                 pct,
-                                "%)"),
+                                "%) \u00B7 ",
+                                S3_DEFAULT_LADDERS[l.key],
+                                " ladders"),
                             React.createElement("span", { className: "text-xl font-mono" },
                                 React.createElement("span", { className: "font-bold tt-accent" },
                                     tmWeight(l.tm, pct),
@@ -1675,8 +1710,8 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
             React.createElement(LabeledInput, { label: "VDOT", value: local.vdot, onChange: (v) => setLocal({ ...local, vdot: v }), full: true }),
             React.createElement("div", { className: "mt-3" },
                 React.createElement("span", { className: "text-sm tt-text-secondary block mb-1" },
-                    "Bench rep capacity ",
-                    React.createElement(Tip, { text: "Sets this lift's Session 1 percentages for every method (Top Set 70/80/90 vs 75/82.5/90; Ladders 70\u201375% vs 72.5\u201377.5%; Straight Sets 65/75/85 vs 67.5/77.5/87.5) and Session 3's ladder % (75% Lower, 80% Higher). If you tend to get more reps at a given %1RM, use Higher." })),
+                    "Bench capacity \u00B7 half-steps (auto) ",
+                    React.createElement(Tip, { text: "Bench progresses in half-steps: finishing a cycle at Lower moves bench to Higher with the TM held; finishing a cycle at Higher raises the TM and returns bench to Lower. (Ladders: a passed gate counts as finishing.) Same average rate as +2.5 lb a cycle without 1.25 lb plates. Tap to set the current half-step yourself." })),
                 React.createElement("div", { className: "flex gap-2" },
                     React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'lower' }), className: `text-sm px-3 py-1.5 rounded border ${(local.benchRepCapacity || 'lower') === 'lower' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Lower"),
                     React.createElement("button", { onClick: () => setLocal({ ...local, benchRepCapacity: 'higher' }), className: `text-sm px-3 py-1.5 rounded border ${local.benchRepCapacity === 'higher' ? 'tt-border-accent tt-bg-accent-tint tt-text-accent-tint' : 'tt-border-light tt-text-secondary'}` }, "Higher"))),
@@ -1697,7 +1732,7 @@ function SetupTab({ profile, onSave, progress, onUpdateProgress, resetArmed, set
         React.createElement("div", { className: "tt-bg-panel border tt-border rounded-lg p-4" },
             React.createElement("h2", { className: "font-bold text-base uppercase tracking-wide mb-2" },
                 "Session 1 Method ",
-                React.createElement(Tip, { text: "Pick a method for each lift. Top Set: top set then 3 / 4 / 5 back-offs at the same weight. Ladders: 2-3-5 ladders with heavy singles, volume falling each week, and a Week 3 pass/fail gate that sets the TM. Straight Sets: 3×8, 4×5, 5×2 at one weight. Top Set and Straight Sets raise the TM 5 lb every cycle Week 3 is completed. Switching takes effect immediately; progression at the cycle's end follows whichever method is selected then." })),
+                React.createElement(Tip, { text: "Pick a method for each lift. Top Set: top set then 3 / 4 / 5 back-offs at the same weight (squat 2 / 3 / 4). Ladders: 2-3-5 ladders with heavy singles, volume falling each week, and a Week 3 pass/fail gate that sets the TM. Straight Sets: 3×8, 4×5, 5×2 at one weight (squat one set fewer each week). Ladders: squat runs 5 fewer reps each week. Top Set and Straight Sets raise the TM 5 lb every cycle Week 3 is completed. Switching takes effect immediately; progression at the cycle's end follows whichever method is selected then." })),
             ['bench', 'squat'].map((lift) => {
                 const cur = liftMethod(local, lift);
                 return (React.createElement("div", { key: lift, className: "mb-3" },
